@@ -11,6 +11,7 @@ import numpy as np
 import random
 import math
 import time
+import os, os.path
 from scipy.interpolate import splprep, splev
 from scipy.ndimage import uniform_filter1d
 from collections import deque
@@ -35,6 +36,7 @@ TRACK_MAX_WIDTH = 42
 TRACK_CURVE_POINTS = ROWS * COLS * SQUARE_SIZE // 5
 TRACK_MIDLINE_COLOUR = WHITE
 TRACK_MAX_DISTANCE_TO_COMPLETE = ROWS * COLS * SQUARE_SIZE ** 1.5 # car will "crash" if it takes more than this distance to complete the maze
+MAZE_DIRECTORY = 'mazes\\'
 
 WINDOW_WIDTH = COLS * SQUARE_SIZE
 WINDOW_HEIGHT = ROWS * SQUARE_SIZE
@@ -48,8 +50,8 @@ CAR_VISION_ANGLES_AND_WEIGHTS = (
     (math.radians(20.0), 1.0/5.0), 
     (math.radians(-45.0), -1.0/6.0), 
     (math.radians(45.0), 1.0/6.0), 
-    (math.radians(-60.0), -1.0/7.0), 
-    (math.radians(60.0), 1.0/7.0), 
+    (math.radians(-60.0), -1.0/6.0), 
+    (math.radians(60.0), 1.0/6.0), 
     (math.radians(-90.0), -1.0/8.0), 
     (math.radians(90.0), 1.0/8.0)
     ) # 0 must be first
@@ -66,10 +68,10 @@ CAR_PATH_COLOUR = RED
 CAR_COLOUR = GREEN
 CAR_VISITED_PATH_RADIUS = 20
 CAR_VISITED_PATH_AVOIDANCE_FACTOR = 0.8
-CAR_WHEN_TO_STEER_FACTOR = 1.2
+CAR_WHEN_TO_STEER_FACTOR = 2.0
 CAR_VISITED_COLOUR = (100,100,100,50)
 CAR_VISITED_FADE_LEVEL = 1.17
-FRAMES_BETWEEN_BLURRING_VISITED = (ROWS * COLS)//1.5 # the bigger the maze, the longer it could be before returning to a visited bit of the maze
+FRAMES_BETWEEN_BLURRING_VISITED = (ROWS * COLS)//1.45 # the bigger the maze, the longer it could be before returning to a visited bit of the maze
 
 class Directions(Enum):
     UP = 1
@@ -265,44 +267,86 @@ class Car():
             if speed_delta > CAR_ACCELERATION_MAX:
                 speed_delta = CAR_ACCELERATION_MAX
 
-            speed_new = self.speed + speed_delta
+            new_speed = self.speed + speed_delta
             
-            if speed_new < CAR_SPEED_MIN:
-                speed_new = CAR_SPEED_MIN
+            if new_speed < CAR_SPEED_MIN:
+                new_speed = CAR_SPEED_MIN
             
-            if speed_new > CAR_SPEED_MAX:
-                speed_new = CAR_SPEED_MAX
+            if new_speed > CAR_SPEED_MAX:
+                new_speed = CAR_SPEED_MAX
             
-            self.speed = speed_new
-
             steering_radians_previous = self.steering_radians
-            steering_angle_new = 0
+            new_steering_angle = 0
             max_track_distance = 1
             #if distance_ahead + CAR_VISITED_PATH_RADIUS < CAR_VISION_DISTANCE / CAR_WHEN_TO_STEER_FACTOR:        
             for ted in track_edge_distances:
                 if ted[0][0] == 0:
                     continue
                 distance_for_angle = ted[1]-(CAR_VISITED_PATH_AVOIDANCE_FACTOR*ted[2])
-                steering_angle_new += distance_for_angle * ted[0][1]
+                new_steering_angle += distance_for_angle * ted[0][1]
                 if distance_for_angle > max_track_distance: max_track_distance = distance_for_angle
 
-            self.steering_radians =  steering_angle_new * CAR_STEERING_MULTIPLIER / max_track_distance
+            new_steering_radians =  new_steering_angle * CAR_STEERING_MULTIPLIER / max_track_distance
 
             # restrict how much the steering can be changed per frame
-            if self.steering_radians < steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX:
-                self.steering_radians = steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX
-            elif self.steering_radians > steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX:
-                self.steering_radians = steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX
+            if new_steering_radians < steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX:
+                new_steering_radians = steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX
+            elif new_steering_radians > steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX:
+                new_steering_radians = steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX
 
             # restrict how much the steering can be per frame
-            if self.steering_radians > CAR_STEERING_RADIANS_MAX:
-                self.steering_radians = CAR_STEERING_RADIANS_MAX
-            elif self.steering_radians < -CAR_STEERING_RADIANS_MAX:
-                self.steering_radians = -CAR_STEERING_RADIANS_MAX
+            if new_steering_radians > CAR_STEERING_RADIANS_MAX:
+                new_steering_radians = CAR_STEERING_RADIANS_MAX
+            elif new_steering_radians < -CAR_STEERING_RADIANS_MAX:
+                new_steering_radians = -CAR_STEERING_RADIANS_MAX
 
-            self.direction_radians += self.steering_radians #* self.speed # direction changes more per frame if you're goig faster
+            new_direction_radians = self.direction_radians + new_steering_radians #* speed_new # direction changes more per frame if you're goig faster
 
-            self.position = (self.position[0] + self.speed * math.cos(self.direction_radians), self.position[1] + self.speed * math.sin(self.direction_radians))
+            new_position = (self.position[0] + new_speed * math.cos(new_direction_radians), self.position[1] + new_speed * math.sin(new_direction_radians))
+
+            if not self.PositionIsOnTrack(new_position):
+                # minimise speed
+                speed_delta = CAR_ACCELERATION_MIN
+                new_speed = self.speed + speed_delta
+                if new_speed < CAR_SPEED_MIN:
+                    new_speed = CAR_SPEED_MIN
+                # turn as sharply as possible
+                if new_steering_radians == 0:
+                    positive_angle_distance = 0
+                    negative_angle_distance = 0
+                    for ted in track_edge_distances:
+                        if ted[0][0] == 0:
+                            continue
+                        elif ted[0][0] < 0:
+                            negative_angle_distance += ted[1]
+                        else:
+                            positive_angle_distance += ted[1]
+                    if positive_angle_distance > negative_angle_distance:
+                        new_steering_radians = CAR_STEERING_RADIANS_DELTA_MAX
+                    else:
+                        new_steering_radians = -CAR_STEERING_RADIANS_DELTA_MAX
+                else:
+                    if new_steering_radians > 0:
+                        new_steering_radians = steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX
+                    else:
+                        new_steering_radians = steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX
+                
+                # restrict how much the steering can be per frame
+                if new_steering_radians > CAR_STEERING_RADIANS_MAX:
+                    new_steering_radians = CAR_STEERING_RADIANS_MAX
+                elif new_steering_radians < -CAR_STEERING_RADIANS_MAX:
+                    new_steering_radians = -CAR_STEERING_RADIANS_MAX
+                
+                new_direction_radians = self.direction_radians + new_steering_radians
+
+                new_position = (self.position[0] + new_speed * math.cos(new_direction_radians), self.position[1] + new_speed * math.sin(new_direction_radians))
+
+
+            self.speed = new_speed
+            self.steering_radians =  new_steering_radians
+            self.direction_radians = new_direction_radians
+
+            self.position = new_position
             self.position_rounded = (round(self.position[0]),round(self.position[1]))    
 
             car_speed_colour = round(255 * self.speed / CAR_SPEED_MAX)
@@ -320,7 +364,7 @@ class Car():
                 return
 
             self.statsInfoCar["frames"] += 1
-            self.statsInfoCar["distance"] += speed_new
+            self.statsInfoCar["distance"] += new_speed
             self.statsInfoCar["average speed"] = self.statsInfoCar["distance"] // self.statsInfoCar["frames"]
             self.statsInfoCar["CAR_SPEED_MIN"] = CAR_SPEED_MIN
             self.statsInfoCar["CAR_SPEED_MAX"] = CAR_SPEED_MAX
@@ -365,6 +409,9 @@ class Car():
                 return False
 
         return True
+
+    def PositionIsOnTrack(self, position):
+        return self.track.track_pixels[round(position[0])][round(position[1])]
     
     def GetTrackEdgeDistances(self, draw_lines):    
         car_on_track = self.track.track_pixels[self.position_rounded]
@@ -427,20 +474,27 @@ class Track():
         self.interpolated_scaled_track = []
         self.track_widths = []
         self.track_pixels = []
+        self.maze = []
     
     def Create(self):
         maze = self.GetNewMaze()
         maze = self.SetMazeEndPoints(maze)
-        #maze = self.GetScaledMaze(maze)
+        self.maze = maze
         self.SetScaledMazeSurface(maze)
         self.track_surface = self.SetTrackPixelsFromMazeSurface(self.track_surface)
-        #self.GetNewTrack()
-        #self.SetScaledTrack()
-        #self.SetInterpolatedScaledTrack()
-        #self.SetTrackWidths()
-        #self.SetTrackPixels()
-        #self.DrawInterpolatedTrack()
-        #self.DrawTrack()
+
+    def Save(self, timestamp):
+        filename = 'maze.txt'
+        if timestamp:
+            timestr = time.strftime("%Y%m%d-%H%M%S")
+            filename = MAZE_DIRECTORY + 'maze_' + timestr + '.txt'
+        np.savetxt(filename, self.maze, fmt='%s')
+
+    def Load(self, filename):
+        maze = np.loadtxt(filename, dtype=np.float32)
+        self.maze = maze
+        self.SetScaledMazeSurface(maze)
+        self.track_surface = self.SetTrackPixelsFromMazeSurface(self.track_surface)
 
     def GetNewMaze(self):
         MAZE_HEIGHT = ROWS + 1
@@ -473,10 +527,6 @@ class Track():
                 surf.set_at((i,j),(colour_val,colour_val,colour_val))
         
         pygame.transform.scale(surf, self.window_size, self.track_surface)
-        # get an array from the screen identifying where the track is
-        #tp = pygame.surfarray.array_red(surf)
-        # reduce this down to an array of booleans where 255 becomes True
-        #self.track_pixels = tp.astype(dtype=bool)
 
     def SetTrackPixelsFromMazeSurface(self, maze_surface):
         track_pixels_surface = pygame.Surface(self.window_size)
@@ -539,6 +589,9 @@ def main():
     running = True
     paused = False
     newTrackAndCarNeeded = True
+    savedMazeFiles = [name for name in os.listdir(MAZE_DIRECTORY) if os.path.isfile(os.path.join(MAZE_DIRECTORY, name))]
+    savedMazeCount = len(savedMazeFiles)
+    savedMazeCounter = 0
     statsInfoGlobal = {
         "Success count" : 0,
         "Max successes in a row" : 0,
@@ -570,7 +623,11 @@ def main():
             CAR_SPEED_MIN = CAR_SPEED_MIN_INITIAL # pixels per frame
             CAR_SPEED_MAX = CAR_SPEED_MAX_INITIAL # pixels per frame
             track = Track(window_size, background)
-            track.Create()
+            if savedMazeCounter < savedMazeCount:
+                track.Load(MAZE_DIRECTORY + savedMazeFiles[savedMazeCounter])
+                savedMazeCounter += 1
+            else:
+                track.Create()
             visitedByCarScreen = visitedByCarScreenCopy.copy() # clear this surface
             car = Car(background, visitedByCarScreen, trackDistancesScreen, track)            
             newTrackAndCarNeeded = False
@@ -612,6 +669,13 @@ def main():
                 elif event.key == pygame.K_LEFT:
                     CAR_SPEED_MIN -= 1
                     CAR_SPEED_MAX -= 1
+                elif event.key == pygame.K_s:
+                    track.Save(timestamp=False)
+                elif event.key == pygame.K_l:
+                    track = Track(window_size, background)
+                    track.Load('maze.txt')
+                    visitedByCarScreen = visitedByCarScreenCopy.copy() # clear this surface
+                    car = Car(background, visitedByCarScreen, trackDistancesScreen, track)  
         
         if paused:
              continue
@@ -636,7 +700,9 @@ def main():
             pygame.time.wait(2000)
 
         if car.crashed:
-            teds = car.GetTrackEdgeDistances(True)
+            track.Save(timestamp=True)
+            newTrackAndCarNeeded = True
+            pygame.time.wait(2000)
 
 # run the main function only if this module is executed as the main script
 # (if you import this as a module then nothing is executed)
