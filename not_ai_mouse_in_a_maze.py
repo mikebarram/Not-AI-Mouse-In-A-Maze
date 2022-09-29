@@ -3,20 +3,20 @@
 # https://github.com/AryanAb/MazeGenerator/blob/master/backtracking.py
 # A good alternative might be https://github.com/AryanAb/MazeGenerator/blob/master/hunt_and_kill.py
 
-import math
-import random
-import sys
 # import the pygame module, so you can use it
 from asyncio.windows_events import NULL
-from collections import deque
-from enum import Enum
-
-import cv2
+from curses import KEY_LEFT
+import pygame, sys
 import numpy as np
-import pygame
-
+import random
+import math
+from scipy.interpolate import splprep, splev
+from scipy.ndimage import uniform_filter1d
+from collections import deque
 #from functools import cache
 
+from enum import Enum
+import cv2
 
 sys.setrecursionlimit(8000)
 
@@ -40,19 +40,20 @@ WINDOW_HEIGHT = ROWS * SQUARE_SIZE
 # cars can only look so far ahead. Needs to be somewhat larger than the maximum track width - try seting that distance to the size of a grid square
 CAR_VISION_DISTANCE = round(2.0 * SQUARE_SIZE)
 #CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -60, 60, -90, 90) # 0 must be first
-CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -70, 70, -80, 80, -90, 90) # 0 must be first
+#CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -70, 70, -80, 80, -90, 90) # 0 must be first # 32 successes with this
+CAR_VISION_ANGLES = (0, -30, 30, -45, 45, -70, 70, -80, 80, -90, 90) # 0 must be first
 CAR_SPEED_MIN_INITIAL = 2 # pixels per frame
 CAR_SPEED_MAX_INITIAL = 5 # pixels per frame
 CAR_SPEED_MIN = CAR_SPEED_MIN_INITIAL # pixels per frame
 CAR_SPEED_MAX = CAR_SPEED_MAX_INITIAL # pixels per frame
 CAR_ACCELERATION_MIN = -3 # change in speed in pixels per frame
-CAR_ACCELERATION_MAX = 2 # change in speed in pixels per frame
+CAR_ACCELERATION_MAX = 1 # change in speed in pixels per frame
 CAR_STEERING_RADIANS_MAX = math.radians(45)
 CAR_STEERING_RADIANS_DELTA_MAX = math.radians(45)
 CAR_PATH_COLOUR = RED
 CAR_COLOUR = GREEN
-CAR_VISITED_PATH_RADIUS = 25
-CAR_VISITED_PATH_AVOIDANCE_FACTOR = 0.8
+CAR_VISITED_PATH_RADIUS = 20                # 32 successes with this at 25
+CAR_VISITED_PATH_AVOIDANCE_FACTOR = 0.9
 CAR_WHEN_TO_STEER_FACTOR = 1.5
 
 class Directions(Enum):
@@ -345,7 +346,7 @@ class Car():
             self.DrawCarFinishLocation(RED)
             return NULL
 
-        # list of tuples: [(angle,distance)]
+        # list of tuples: [(angle,distance,how many had been visited previously)]
         track_edge_distances = []
 
         for vision_angle in CAR_VISION_ANGLES:
@@ -514,13 +515,11 @@ def main():
     newTrackAndCarNeeded = True
     statsInfoGlobal = {
         "SuccessCount" : 0,
-        "MaxSuccessesInARow" : 0,
-        "Total frames" : 0
+        "MaxSuccessesInARow" : 0
     }
 
     # main loop
     while running:
-        statsInfoGlobal["Total frames"] += 1
         if newTrackAndCarNeeded:
             # create the track and draw it on the background
             try:
@@ -596,7 +595,7 @@ def main():
         car.carIconGroup.draw(screen)
         screen.blit(statsSurface, (0,0))
         pygame.display.update()
-        clock.tick(400)
+        clock.tick(200)
 
         if car.crashed or car.won:
             newTrackAndCarNeeded = True
