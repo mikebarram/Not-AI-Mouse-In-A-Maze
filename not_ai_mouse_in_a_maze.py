@@ -1,3 +1,18 @@
+'''
+*** HOW TO PROFILE ***
+Install gprof2dot and dot
+On Windows, to install dot, install Graphviz and make sure the path to the bin folder that contains dot.exe is in the PATH environment variable (or include the full path to dot when you call it)
+
+Get the programme to start and end e.g. in main add
+if statsInfoGlobal["Total frames"] > 10000:
+            break
+In the terminal run
+python -m cProfile -o output.pstats maze-16-profile.py
+gprof2dot -f pstats output.pstats | "C:\Program Files\Graphviz\bin\dot.exe" -Tpng -o output.png
+Have a look at output.png
+'''
+
+
 # A program which uses recursive backtracking to generate a maze
 # https://aryanab.medium.com/maze-generation-recursive-backtracking-5981bc5cc766
 # https://github.com/AryanAb/MazeGenerator/blob/master/backtracking.py
@@ -12,6 +27,7 @@ import random
 import math
 import time
 import os, os.path
+import itertools
 from scipy.interpolate import splprep, splev
 from scipy.ndimage import uniform_filter1d
 from scipy.ndimage.filters import gaussian_filter
@@ -30,20 +46,15 @@ GREEN = (0, 255, 0)
 START_COLOUR = (200, 200, 0)
 SQUARE_SIZE = 70
 ROWS = 13
-COLS = 19
-TRACK_MIN_WIDTH = 15
-TRACK_MAX_WIDTH = 42
-TRACK_CURVE_POINTS = ROWS * COLS * SQUARE_SIZE // 5
-TRACK_MIDLINE_COLOUR = WHITE
+COLS = 21
 TRACK_MAX_DISTANCE_TO_COMPLETE = ROWS * COLS * SQUARE_SIZE ** 1.5 # car will "crash" if it takes more than this distance to complete the maze
-MAZE_DIRECTORY = 'mazes\\'
+MAZE_DIRECTORY = f'mazes\\{COLS}x{ROWS}\\' # mazes that the mouse fails to solve are saved here. Any mazes in here are reloaded at the start of session.
 
 WINDOW_WIDTH = COLS * SQUARE_SIZE
 WINDOW_HEIGHT = ROWS * SQUARE_SIZE
 
-# cars can only look so far ahead. Needs to be somewhat larger than the maximum track width - try seting that distance to the size of a grid square
+# Mice can only look so far ahead. Needs to be somewhat larger than drid size for the maze
 CAR_VISION_DISTANCE = round(2.0 * SQUARE_SIZE)
-#CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -60, 60, -90, 90) # 0 must be first
 CAR_VISION_ANGLES_AND_WEIGHTS = (
     (math.radians(0.0), 1.0/2.0), 
     (math.radians(-15.0), -1.0/5.0), 
@@ -63,7 +74,7 @@ CAR_ACCELERATION_MIN = -3 # change in speed in pixels per frame
 CAR_ACCELERATION_MAX = 2 # change in speed in pixels per frame
 CAR_STEERING_RADIANS_MAX = math.radians(45)
 CAR_STEERING_RADIANS_DELTA_MAX = math.radians(45)
-CAR_STEERING_MULTIPLIER = 1.5
+CAR_STEERING_MULTIPLIER = 1.8
 CAR_PATH_COLOUR = RED
 CAR_COLOUR = GREEN
 CAR_VISITED_PATH_RADIUS = 20
@@ -72,7 +83,7 @@ CAR_WHEN_TO_STEER_FACTOR = 2.0
 CAR_VISITED_COLOUR = (100,100,100,50)
 CAR_VISITED_FADE_LEVEL = 1.17
 FRAMES_BETWEEN_BLURRING_VISITED = (ROWS * COLS)//15 # the bigger the maze, the longer it could be before returning to a visited bit of the maze
-FRAME_DISPLAY_RATE = 10
+FRAME_DISPLAY_RATE = 50
 
 def CreateTrailCircleAlpha(CAR_VISITED_PATH_RADIUS, trail_alpha):
     x = np.arange(-CAR_VISITED_PATH_RADIUS, CAR_VISITED_PATH_RADIUS)
@@ -289,26 +300,7 @@ class Car():
                 new_steering_radians = -CAR_STEERING_RADIANS_MAX
 
             new_direction_radians = self.direction_radians + new_steering_radians #* speed_new # direction changes more per frame if you're goig faster
-            track_edge_distance, visited_count, visited_alpha_total = self.GetTrackEdgeDistance(new_steering_radians, False)
-            '''
-            if track_edge_distance < max_track_distance/3:
-                new_steering_radians = ted[0][0]
-                
-                # restrict how much the steering can be changed per frame
-                if new_steering_radians < steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX:
-                    new_steering_radians = steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX
-                elif new_steering_radians > steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX:
-                    new_steering_radians = steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX
-
-                # restrict how much the steering can be per frame
-                if new_steering_radians > CAR_STEERING_RADIANS_MAX:
-                    new_steering_radians = CAR_STEERING_RADIANS_MAX
-                elif new_steering_radians < -CAR_STEERING_RADIANS_MAX:
-                    new_steering_radians = -CAR_STEERING_RADIANS_MAX
-
-                new_direction_radians = self.direction_radians + new_steering_radians #* speed_new # direction changes more per frame if you're goig faster
-                track_edge_distance, visited_count, visited_alpha_total = self.GetTrackEdgeDistance(new_direction_radians, False)
-            '''        
+            track_edge_distance, visited_count, visited_alpha_total = self.GetTrackEdgeDistance(new_steering_radians, False)   
             
             speed_delta = 4 * (track_edge_distance/CAR_VISION_DISTANCE) - 2
             
@@ -328,103 +320,6 @@ class Car():
 
             new_position = (self.position[0] + new_speed * math.cos(new_direction_radians), self.position[1] + new_speed * math.sin(new_direction_radians))
 
-
-
-
-            """
-
-            if self.CheckIfDeadEnd(track_edge_distances) == True:
-                self.direction_radians += math.pi
-            else:
-                # in future, do some neural network magic to decide how much to steer and how much to change speed
-                # for now, get the change in speed, based on how clear the road is straight ahead
-                distance_ahead = track_edge_distances[0][1] # how far is clear straight ahead
-                distance_ahead -= track_edge_distances[0][2] # subtract the distance ahead that has already been visited
-                speed_delta = 4 * (distance_ahead/CAR_VISION_DISTANCE) - 2
-
-                if speed_delta < CAR_ACCELERATION_MIN:
-                    speed_delta = CAR_ACCELERATION_MIN
-                
-                if speed_delta > CAR_ACCELERATION_MAX:
-                    speed_delta = CAR_ACCELERATION_MAX
-
-                new_speed = self.speed + speed_delta
-                
-                if new_speed < CAR_SPEED_MIN:
-                    new_speed = CAR_SPEED_MIN
-                
-                if new_speed > CAR_SPEED_MAX:
-                    new_speed = CAR_SPEED_MAX
-                
-                steering_radians_previous = self.steering_radians
-                new_steering_angle = 0
-                max_track_distance = 1
-                #if distance_ahead + CAR_VISITED_PATH_RADIUS < CAR_VISION_DISTANCE / CAR_WHEN_TO_STEER_FACTOR:        
-                for ted in track_edge_distances:
-                    if ted[0][0] == 0:
-                        continue
-                    distance_for_angle = ted[1]-(CAR_VISITED_PATH_AVOIDANCE_FACTOR*ted[2]) # this takes into account how many of the pixels have been visited but not alpha for each pixel (summed in ted[3])
-                    new_steering_angle += distance_for_angle * ted[0][1]
-                    if distance_for_angle > max_track_distance: max_track_distance = distance_for_angle
-
-                new_steering_radians =  new_steering_angle * CAR_STEERING_MULTIPLIER / max_track_distance
-
-                # restrict how much the steering can be changed per frame
-                if new_steering_radians < steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX:
-                    new_steering_radians = steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX
-                elif new_steering_radians > steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX:
-                    new_steering_radians = steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX
-
-                # restrict how much the steering can be per frame
-                if new_steering_radians > CAR_STEERING_RADIANS_MAX:
-                    new_steering_radians = CAR_STEERING_RADIANS_MAX
-                elif new_steering_radians < -CAR_STEERING_RADIANS_MAX:
-                    new_steering_radians = -CAR_STEERING_RADIANS_MAX
-
-                new_direction_radians = self.direction_radians + new_steering_radians #* speed_new # direction changes more per frame if you're goig faster
-
-                new_position = (self.position[0] + new_speed * math.cos(new_direction_radians), self.position[1] + new_speed * math.sin(new_direction_radians))
-
-                if not self.PositionIsOnTrack(new_position):
-                    # minimise speed
-                    speed_delta = CAR_ACCELERATION_MIN
-                    new_speed = self.speed + speed_delta
-                    if new_speed < CAR_SPEED_MIN:
-                        new_speed = CAR_SPEED_MIN
-                    # turn as sharply as possible
-                    if new_steering_radians == 0:
-                        positive_angle_distance = 0
-                        negative_angle_distance = 0
-                        for ted in track_edge_distances:
-                            if ted[0][0] == 0:
-                                continue
-                            elif ted[0][0] < 0:
-                                negative_angle_distance += ted[1]
-                            else:
-                                positive_angle_distance += ted[1]
-                        if positive_angle_distance > negative_angle_distance:
-                            new_steering_radians = CAR_STEERING_RADIANS_DELTA_MAX
-                        else:
-                            new_steering_radians = -CAR_STEERING_RADIANS_DELTA_MAX
-                    else:
-                        if new_steering_radians > 0:
-                            new_steering_radians = steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX
-                        else:
-                            new_steering_radians = steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX
-                    
-                    # restrict how much the steering can be per frame
-                    if new_steering_radians > CAR_STEERING_RADIANS_MAX:
-                        new_steering_radians = CAR_STEERING_RADIANS_MAX
-                    elif new_steering_radians < -CAR_STEERING_RADIANS_MAX:
-                        new_steering_radians = -CAR_STEERING_RADIANS_MAX
-                    
-                    new_direction_radians = self.direction_radians + new_steering_radians
-
-                    new_position = (self.position[0] + new_speed * math.cos(new_direction_radians), self.position[1] + new_speed * math.sin(new_direction_radians))
-
-            """
-
-
             self.speed = new_speed
             self.steering_radians =  new_steering_radians
             self.direction_radians = new_direction_radians
@@ -440,7 +335,7 @@ class Car():
                 pygame.display.update(pygame.Rect(self.position_rounded[0],self.position_rounded[1],1,1))
                 pygame.display.update()
 
-            self.UpdateVisited()
+            self.UpdateVisited(drawFrame)
 
             # decided that the car has "crashed" if it has taken more than this distance to complete the maze
             if self.statsInfoCar["distance"] > TRACK_MAX_DISTANCE_TO_COMPLETE:
@@ -467,9 +362,9 @@ class Car():
             self.carIconGroup.update(self.position_rounded[0], self.position_rounded[1], self.direction_radians)
 
         if self.statsInfoCar["frames"] % FRAMES_BETWEEN_BLURRING_VISITED == 0:
-            self.FadeVisited()
+            self.FadeVisited(self.visitedAlpha)
 
-    def UpdateVisited(self):
+    def UpdateVisited(self, drawFrame):
         # update a 2d numpy array that represents visited pixels.
         # it should add a circular array behind itself.
         # needs to know the angle of travel
@@ -477,26 +372,34 @@ class Car():
         circle_top_left_x = round(self.position[0] - CAR_VISITED_PATH_RADIUS * math.cos(self.direction_radians) - CAR_VISITED_PATH_RADIUS)
         circle_top_left_y = round(self.position[1] - CAR_VISITED_PATH_RADIUS * math.sin(self.direction_radians) - CAR_VISITED_PATH_RADIUS)
         #https://stackoverflow.com/questions/9886303/adding-different-sized-shaped-displaced-numpy-matrices
-        self.visitedAlpha[circle_top_left_x:circle_top_left_x+2*CAR_VISITED_PATH_RADIUS,circle_top_left_y:circle_top_left_y+2*CAR_VISITED_PATH_RADIUS] += CAR_TRAIL_CIRCLE_ALPHA  # use array slicing
-        np.clip(self.visitedAlpha, 0, 255, out=self.visitedAlpha)
+        sectionToUpdate = self.visitedAlpha[circle_top_left_x:circle_top_left_x+2*CAR_VISITED_PATH_RADIUS,circle_top_left_y:circle_top_left_y+2*CAR_VISITED_PATH_RADIUS]
+        sectionToUpdate += CAR_TRAIL_CIRCLE_ALPHA  # use array slicing
+        np.clip(sectionToUpdate, 0, 255, out=sectionToUpdate)
         
-        # from https://github.com/pygame/pygame/issues/1244
-        surface_alpha = np.array(self.visitedByCarScreen.get_view('A'), copy=False)
-        surface_alpha[:,:] = self.visitedAlpha
+        if drawFrame:
+            # from https://github.com/pygame/pygame/issues/1244
+            surface_alpha = np.array(self.visitedByCarScreen.get_view('A'), copy=False)
+            surface_alpha[:,:] = self.visitedAlpha
 
-    def FadeVisited(self):
+    @staticmethod
+    #@jit(nopython=True)                             
+    def FadeVisited(visitedAlpha):
         # subtract from the alpha channel but stop it going below zero
-        self.visitedAlpha -= 1
-        np.clip(self.visitedAlpha, 0, 255, out=self.visitedAlpha)
+        visitedAlpha -= 1
+        np.clip(visitedAlpha, 0, 255, out=visitedAlpha)
         return
     
-    def CheckIfPositionWins(self, x, y):
+    @staticmethod
+    #@jit(nopython=True)                             
+    def CheckIfPositionWins(x, y):
         if -2 < x/SQUARE_SIZE-COLS < -1 and -2 < y/SQUARE_SIZE-ROWS < -1:
             return True
         else:
             return False
 
-    def CheckIfDeadEnd(self, track_edge_distances):
+    @staticmethod
+    #@jit(nopython=True)                             
+    def CheckIfDeadEnd(track_edge_distances):
         # if any of the distances is more than the size of a square, then it's not a dead end
         for ted in track_edge_distances:
             if math.pi/-2.0<=ted[0][0]<=math.pi/2.0 and ted[1] > SQUARE_SIZE:
@@ -531,34 +434,39 @@ class Car():
         delta_x = math.cos(search_angle_radians)
         delta_y = math.sin(search_angle_radians)
 
-        #test_x, test_y = self.position_rounded
-        edge_distance = 0
-        visited_count = 0
-        visited_alpha_total = 0
+        test_x = self.position_rounded[0]
+        test_y = self.position_rounded[1]
+        edge_distance = np.int64(0)
+        visited_count = np.int64(0)
+        visited_alpha_total = np.int64(0)
 
         for i in range(CAR_VISITED_PATH_RADIUS, CAR_VISION_DISTANCE):
             edge_distance = i
-            test_x = self.position_rounded[0] + i * delta_x
-            test_y = self.position_rounded[1] + i * delta_y
-            if self.track.track_pixels[round(test_x)][round(test_y)] == False:
+            test_x += delta_x
+            test_y += delta_y
+            # saving the rounded values, rather than rounding twice improves performance of this function by ~5% and by ~3% overall
+            test_x_round = round(test_x)
+            test_y_round = round(test_y)
+            if self.track.track_pixels[test_x_round][test_y_round] == False:
                 break
             
-            visited_alpha = self.visitedAlpha[round(test_x),round(test_y)]
+            visited_alpha = self.visitedAlpha[test_x_round,test_y_round]
             visited_alpha_total += visited_alpha
             if visited_alpha > 0:
                 visited_count += 1 
 
         if draw_line:
-            self.DrawLineToTrackEdge(test_x, test_y)
+            self.DrawLineToTrackEdge(test_x_round, test_y_round)
 
         return edge_distance, visited_count, visited_alpha_total
     
-    def DrawLineToTrackEdge(self, test_x, test_y):
-        pygame.draw.line(self.trackDistancesScreen, WHITE, self.position_rounded, [round(test_x), round(test_y)])
+    def DrawLineToTrackEdge(self, test_x_round, test_y_round):
+        pygame.draw.line(self.trackDistancesScreen, WHITE, self.position_rounded, [test_x_round, test_y_round])
 
     def DrawCarFinishLocation(self, highlight_colour):
-        pygame.draw.circle(self.screen, highlight_colour, self.position_rounded, TRACK_MAX_WIDTH, width=2)
-        finish_zone = pygame.Rect(self.position_rounded[0] - TRACK_MAX_WIDTH, self.position_rounded[1] - TRACK_MAX_WIDTH, 2 * TRACK_MAX_WIDTH, 2 * TRACK_MAX_WIDTH)
+        finish_radius = SQUARE_SIZE//2
+        pygame.draw.circle(self.screen, highlight_colour, self.position_rounded, finish_radius, width=2)
+        finish_zone = pygame.Rect(self.position_rounded[0] - finish_radius, self.position_rounded[1] - finish_radius, 2 * finish_radius, 2 * finish_radius)
         pygame.display.update(finish_zone)
 
 class Track():
@@ -688,6 +596,8 @@ def main():
     paused = False
     drawFrame = False
     newTrackAndCarNeeded = True
+    if not os.path.exists(MAZE_DIRECTORY):
+        os.mkdir(MAZE_DIRECTORY)
     savedMazeFiles = [name for name in os.listdir(MAZE_DIRECTORY) if os.path.isfile(os.path.join(MAZE_DIRECTORY, name))]
     savedMazeCount = len(savedMazeFiles)
     savedMazeCounter = 0
@@ -702,6 +612,8 @@ def main():
     # main loop
     while running:
         statsInfoGlobal["Total frames"] += 1
+        if statsInfoGlobal["Total frames"] > 10000:
+            break
         elapsedTime = time.monotonic() - startTime
         statsInfoGlobal["FPS"] = statsInfoGlobal["Total frames"] // elapsedTime
         if newTrackAndCarNeeded:
@@ -777,9 +689,9 @@ def main():
             
         if not car.crashed and not car.won:
             car.Drive(drawFrame)
-            StatsUpdate(statsSurface, car.statsInfoCar, statsInfoGlobal)
         
         if drawFrame:
+            StatsUpdate(statsSurface, car.statsInfoCar, statsInfoGlobal)
             pygame.display.flip()
             screen.blit(background, (0,0))
             screen.blit(car.visitedByCarScreen, (0,0))
