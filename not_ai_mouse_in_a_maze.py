@@ -42,7 +42,16 @@ WINDOW_HEIGHT = ROWS * SQUARE_SIZE
 # cars can only look so far ahead. Needs to be somewhat larger than the maximum track width - try seting that distance to the size of a grid square
 CAR_VISION_DISTANCE = round(2.0 * SQUARE_SIZE)
 #CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -60, 60, -90, 90) # 0 must be first
-CAR_VISION_ANGLES = (0.0, -20.0, 20.0, -45.0, 45.0, -70.0, 70.0, -80.0, 80.0, -90.0, 90.0) # 0 must be first
+CAR_VISION_ANGLES_AND_WEIGHTS = (
+    (math.radians(0.0), 1.0/2.0), 
+    (math.radians(-20.0), -1.0/5.0), 
+    (math.radians(20.0), 1.0/5.0), 
+    (math.radians(-45.0), -1.0/7.0), 
+    (math.radians(45.0), 1.0/7.0), 
+    (math.radians(-60.0), -1.0/8.0), 
+    (math.radians(60.0), 1.0/8.0), 
+    (math.radians(-90.0), -1.0/9.0), 
+    (math.radians(90.0), 1.0/9.0)) # 0 must be first
 CAR_SPEED_MIN_INITIAL = 2 # pixels per frame
 CAR_SPEED_MAX_INITIAL = 5 # pixels per frame
 CAR_SPEED_MIN = CAR_SPEED_MIN_INITIAL # pixels per frame
@@ -221,8 +230,13 @@ class Car():
         self.carIconGroup = pygame.sprite.Group()
         self.carIconGroup.add(self.carIcon)
 
+    #@jit
     def Drive(self):
-        track_edge_distances = self.GetTrackEdgeDistances(True)
+        draw_lines = True
+        track_edge_distances = self.GetTrackEdgeDistances(draw_lines)
+        if draw_lines is True:
+            pygame.display.update()
+
         if self.crashed:
             return
         if self.CheckIfWon():            
@@ -261,11 +275,11 @@ class Car():
             max_track_distance = 1
             if distance_ahead < CAR_VISION_DISTANCE / CAR_WHEN_TO_STEER_FACTOR:        
                 for ted in track_edge_distances:
-                    if ted[0] == 0:
+                    if ted[0][0] == 0:
                         continue
                     distance_for_angle = ted[1]-(CAR_VISITED_PATH_AVOIDANCE_FACTOR*ted[2])
                     #steering_angle_new += ted[1] / ted[0]
-                    steering_angle_new += distance_for_angle * math.sqrt(abs(ted[0])) / ted[0]
+                    steering_angle_new += distance_for_angle * ted[0][1]
                     if distance_for_angle > max_track_distance: max_track_distance = distance_for_angle
 
             #self.steering_radians =  5 * steering_angle_new / max_track_distance
@@ -325,7 +339,7 @@ class Car():
         self.visited[self.position_rounded[0]-CAR_VISITED_PATH_RADIUS:self.position_rounded[0]+CAR_VISITED_PATH_RADIUS, self.position_rounded[1]-CAR_VISITED_PATH_RADIUS:self.position_rounded[1]+CAR_VISITED_PATH_RADIUS] = True
         pygame.draw.circle(self.visitedByCarScreen, (0,0,0,40), self.position_previous_rounded, CAR_VISITED_PATH_RADIUS)
 
-    @jit
+    #@jit
     def CheckIfWon(self):
         if -2 < self.position[0]/SQUARE_SIZE-COLS < -1 and -2 < self.position[1]/SQUARE_SIZE-ROWS < -1:
             self.won = True
@@ -333,16 +347,16 @@ class Car():
         else:
             return False
 
-    @jit
+    #@jit
     def CheckIfDeadEnd(self, track_edge_distances):
         # if any of the distances is more than 2/3 of the size of a square, then it's not a dead end
         for ted in track_edge_distances:
-            if -90<=ted[0]<=90 and ted[1] > SQUARE_SIZE * 2 / 3:
+            if math.pi/-2.0<=ted[0][0]<=math.pi/2.0 and ted[1] > SQUARE_SIZE * 2.0 / 3.0:
                 return False
 
         return True
     
-    @jit
+    #@jit
     def GetTrackEdgeDistances(self, draw_lines):    
         car_on_track = self.track.track_pixels[self.position_rounded]
         if not car_on_track:
@@ -353,21 +367,17 @@ class Car():
         # list of tuples: [(angle,distance)]
         track_edge_distances = []
 
-        for vision_angle in CAR_VISION_ANGLES:
-            track_edge_distance, visited_count = self.GetTrackEdgeDistance(vision_angle, draw_lines)
-            track_edge_distances.append((vision_angle, track_edge_distance, visited_count))
-
-        #if draw_lines is True:
-        pygame.display.update()
+        for vision_angle_and_weight in CAR_VISION_ANGLES_AND_WEIGHTS:
+            track_edge_distance, visited_count = self.GetTrackEdgeDistance(vision_angle_and_weight[0], draw_lines)
+            track_edge_distances.append((vision_angle_and_weight, track_edge_distance, visited_count))
         
-        #self.crashed = False
         return track_edge_distances
     
-    @jit
+    #@jit
     def GetTrackEdgeDistance(self, vision_angle, draw_line):
         # from x,y follow a line at vision_angle until no longer on the track
         # or until CAR_VISION_DISTANCE has been reached
-        search_angle_radians = self.direction_radians + math.radians(vision_angle)
+        search_angle_radians = self.direction_radians + vision_angle
         delta_x = math.cos(search_angle_radians)
         delta_y = math.sin(search_angle_radians)
 
@@ -384,12 +394,13 @@ class Car():
             if i>10 and self.visited[round(test_x)][round(test_y)] == True:
                 visited_count += 1 
         
-        #edge_distance -= 1.2 * visited_count
-
         if draw_line:
-            pygame.draw.line(self.trackDistancesScreen, RED, self.position_rounded, [round(test_x), round(test_y)])
+            self.DrawLineToTrackEdge(test_x, test_y)
 
         return edge_distance, visited_count
+    
+    def DrawLineToTrackEdge(self, test_x, test_y):
+        pygame.draw.line(self.trackDistancesScreen, WHITE, self.position_rounded, [round(test_x), round(test_y)])
     
     def DrawCarFinishLocation(self, highlight_colour):
         pygame.draw.circle(self.screen, highlight_colour, self.position_rounded, TRACK_MAX_WIDTH, width=2)
@@ -610,9 +621,14 @@ def main():
         pygame.display.update()
         clock.tick(400)
 
-        if car.crashed or car.won:
+        #if car.crashed or car.won:
+        if car.won:
             newTrackAndCarNeeded = True
             pygame.time.wait(2000)
+
+        if car.crashed:
+            teds = car.GetTrackEdgeDistances(True)
+            test = car.CheckIfDeadEnd(teds)
 
 # run the main function only if this module is executed as the main script
 # (if you import this as a module then nothing is executed)
