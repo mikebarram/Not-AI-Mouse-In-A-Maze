@@ -85,8 +85,10 @@ def CreateTrailCircleAlpha(CAR_VISITED_PATH_RADIUS, trail_alpha):
 
     # The two lines below could be merged, but I stored the mask
     # for code clarity.
-    mask = (x[np.newaxis,:]-cx)**2 + (y[:,np.newaxis]-cy)**2 < r**2
-    arrAlpha[mask] = trail_alpha
+    maskOuter = (x[np.newaxis,:]-cx)**2 + (y[:,np.newaxis]-cy)**2 < r**2
+    maskInner = (x[np.newaxis,:]-cx)**2 + (y[:,np.newaxis]-cy)**2 < (r-2)**2
+    arrAlpha[maskOuter] = trail_alpha//2
+    arrAlpha[maskInner] = trail_alpha
     # would be nice for the values to be lower around the edge of the circle
     return arrAlpha
 
@@ -496,6 +498,7 @@ class Track():
         self.track_widths = []
         self.track_pixels = []
         self.maze = []
+        self.fromSaved = False
     
     def Create(self):    
         pygame.display.set_caption("New maze")
@@ -518,6 +521,7 @@ class Track():
         self.maze = maze
         self.SetScaledMazeSurface(maze)
         self.track_surface = self.SetTrackPixelsFromMazeSurface(self.track_surface)
+        self.fromSaved = True
 
     def GetNewMaze(self):
         MAZE_HEIGHT = ROWS + 1
@@ -714,7 +718,8 @@ def main():
             pygame.time.wait(2000)
 
         if car.crashed:
-            track.Save(timestamp=True)
+            if not track.fromSaved: # don't re-save a track that has been loaded from a saved track - however a log of those saved ones that have failed again would be n
+                track.Save(timestamp=True)
             newTrackAndCarNeeded = True
             pygame.time.wait(2000)
 
