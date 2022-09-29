@@ -9,14 +9,11 @@ import sys
 # import the pygame module, so you can use it
 from asyncio.windows_events import NULL
 from collections import deque
-from curses import KEY_LEFT
 from enum import Enum
 
 import cv2
 import numpy as np
 import pygame
-from scipy.interpolate import splev, splprep
-from scipy.ndimage import uniform_filter1d
 
 #from functools import cache
 
@@ -53,6 +50,8 @@ CAR_STEERING_RADIANS_MAX = math.radians(45)
 CAR_STEERING_RADIANS_DELTA_MAX = math.radians(45)
 CAR_PATH_COLOUR = RED
 CAR_COLOUR = GREEN
+CAR_VISITED_PATH_RADIUS = 25
+CAR_VISITED_PATH_AVOIDANCE_FACTOR = 0.8
 
 class Directions(Enum):
     UP = 1
@@ -170,8 +169,10 @@ class CarIcon(pygame.sprite.Sprite):
         return rot_image,rot_rect
     
 class Car():
-    def __init__(self, screen, track):
+    def __init__(self, screen, visitedByCarScreen, trackDistancesScreen, track):
         self.screen = screen
+        self.visitedByCarScreen = visitedByCarScreen
+        self.trackDistancesScreen = trackDistancesScreen
         self.track = track
 
         #if isinstance(position, tuple):
@@ -192,7 +193,9 @@ class Car():
         self.direction_radians = math.pi/3
         self.steering_radians = 0
         self.crashed = False
+        self.won = False
         self.position_previous_rounded = self.position_rounded
+        self.visited = np.full(screen.get_size(), False)
         
         self.statsInfo = {
             "distance":0.0,
@@ -216,105 +219,136 @@ class Car():
         self.carIconGroup.add(self.carIcon)
 
     def Drive(self):
-        track_edge_distances = self.GetTrackEdgeDistances(False)
+        track_edge_distances = self.GetTrackEdgeDistances(True)
         if self.crashed:
+            return
+        if self.CheckIfWon():            
+            self.DrawCarFinishLocation(GREEN)
             return
         
         self.position_previous_rounded = self.position_rounded
 
-        # in future, do some neural network magic to decide how much to steer and how much to change speed
-        # for now, get the change in speed, based on how clear the road is straight ahead
-        distance_ahead = track_edge_distances[0][1] # how far is clear straight ahead
-        speed_delta = 4 * (distance_ahead/CAR_VISION_DISTANCE) - 2
+        if self.CheckIfDeadEnd(track_edge_distances) == True:
+            self.direction_radians += math.pi
+        else:
+            # in future, do some neural network magic to decide how much to steer and how much to change speed
+            # for now, get the change in speed, based on how clear the road is straight ahead
+            distance_ahead = track_edge_distances[0][1] # how far is clear straight ahead
+            distance_ahead -= track_edge_distances[0][2]
+            speed_delta = 4 * (distance_ahead/CAR_VISION_DISTANCE) - 2
 
-        if speed_delta < CAR_ACCELERATION_MIN:
-            speed_delta = CAR_ACCELERATION_MIN
+            if speed_delta < CAR_ACCELERATION_MIN:
+                speed_delta = CAR_ACCELERATION_MIN
+            
+            if speed_delta > CAR_ACCELERATION_MAX:
+                speed_delta = CAR_ACCELERATION_MAX
+
+            speed_new = self.speed + speed_delta
+            
+            if speed_new < CAR_SPEED_MIN:
+                speed_new = CAR_SPEED_MIN
+            
+            if speed_new > CAR_SPEED_MAX:
+                speed_new = CAR_SPEED_MAX
+            
+            self.speed = speed_new
+
+            steering_radians_previous = self.steering_radians
+            steering_angle_new = 0
+            max_track_distance = 1
+            if distance_ahead < CAR_VISION_DISTANCE / 1.8:        
+                for ted in track_edge_distances:
+                    if ted[0] == 0:
+                        continue
+                    distance_for_angle = ted[1]-(CAR_VISITED_PATH_AVOIDANCE_FACTOR*ted[2])
+                    #steering_angle_new += ted[1] / ted[0]
+                    steering_angle_new += distance_for_angle * math.sqrt(abs(ted[0])) / ted[0]
+                    if distance_for_angle > max_track_distance: max_track_distance = distance_for_angle
+
+            #self.steering_radians =  5 * steering_angle_new / max_track_distance
+            self.steering_radians =  steering_angle_new / max_track_distance
+
+            # restrict how much the steering can be changed per frame
+            if self.steering_radians < steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX:
+                self.steering_radians = steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX
+            elif self.steering_radians > steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX:
+                self.steering_radians = steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX
+
+            # restrict how much the steering can be per frame
+            if self.steering_radians > CAR_STEERING_RADIANS_MAX:
+                self.steering_radians = CAR_STEERING_RADIANS_MAX
+            elif self.steering_radians < -CAR_STEERING_RADIANS_MAX:
+                self.steering_radians = -CAR_STEERING_RADIANS_MAX
+
+            self.direction_radians += self.steering_radians #* self.speed # direction changes more per frame if you're goig faster
+
+            self.position = (self.position[0] + self.speed * math.cos(self.direction_radians), self.position[1] + self.speed * math.sin(self.direction_radians))
+            self.position_rounded = (round(self.position[0]),round(self.position[1]))    
+
+            car_speed_colour = round(255 * self.speed / CAR_SPEED_MAX)
+            car_colour = (255 - car_speed_colour, car_speed_colour, 0)
+            self.screen.set_at(self.position_rounded, car_colour)
+            pygame.display.update(pygame.Rect(self.position_rounded[0],self.position_rounded[1],1,1))
+            pygame.display.update()
+
+            self.UpdateVisited()
+
+            self.statsInfo["frames"] += 1
+            self.statsInfo["distance"] += speed_new
+            self.statsInfo["average speed"] = self.statsInfo["distance"] // self.statsInfo["frames"]
+            self.statsInfo["rotations"] += self.steering_radians / (2 * math.pi)
+            self.statsInfo["CAR_SPEED_MIN"] = CAR_SPEED_MIN
+            self.statsInfo["CAR_SPEED_MAX"] = CAR_SPEED_MAX
         
-        if speed_delta > CAR_ACCELERATION_MAX:
-            speed_delta = CAR_ACCELERATION_MAX
-
-        speed_new = self.speed + speed_delta
-        
-        if speed_new < CAR_SPEED_MIN:
-            speed_new = CAR_SPEED_MIN
-        
-        if speed_new > CAR_SPEED_MAX:
-            speed_new = CAR_SPEED_MAX
-        
-        self.speed = speed_new
-
-        steering_radians_previous = self.steering_radians
-        steering_angle_new = 0
-        max_track_distance = 1
-        if distance_ahead < CAR_VISION_DISTANCE / 1.8:        
-            for ted in track_edge_distances:
-                if ted[0] == 0:
-                    continue
-                steering_angle_new += ted[1] / ted[0]
-                if ted[1] > max_track_distance: max_track_distance = ted[1]
-
-        self.steering_radians = 5 * steering_angle_new / max_track_distance
-
-        # restrict how much the steering can be changed per frame
-        if self.steering_radians < steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX:
-            self.steering_radians = steering_radians_previous - CAR_STEERING_RADIANS_DELTA_MAX
-        elif self.steering_radians > steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX:
-            self.steering_radians = steering_radians_previous + CAR_STEERING_RADIANS_DELTA_MAX
-
-        # restrict how much the steering can be per frame
-        if self.steering_radians > CAR_STEERING_RADIANS_MAX:
-            self.steering_radians = CAR_STEERING_RADIANS_MAX
-        elif self.steering_radians < -CAR_STEERING_RADIANS_MAX:
-            self.steering_radians = -CAR_STEERING_RADIANS_MAX
-
-        self.direction_radians += self.steering_radians #* self.speed # direction changes more per frame if you're goig faster
-
-        self.position = (self.position[0] + self.speed * math.cos(self.direction_radians), self.position[1] + self.speed * math.sin(self.direction_radians))
-        self.position_rounded = (round(self.position[0]),round(self.position[1]))    
-
-        car_speed_colour = round(255 * self.speed / CAR_SPEED_MAX)
-        car_colour = (255 - car_speed_colour, car_speed_colour, 0)
-        self.screen.set_at(self.position_rounded, car_colour)
-        pygame.display.update(pygame.Rect(self.position_rounded[0],self.position_rounded[1],1,1))
-        pygame.display.update()
-        
+            self.instructions = {
+                "speed":self.speed,
+                "speed_delta":speed_delta,
+                "direction_radians":self.direction_radians,
+                "steering_radians":self.steering_radians,
+                "track_edge_distances":track_edge_distances
+                }
+            self.latestInstructions.appendleft(self.instructions)
+            
         #self.carIconGroup.draw(self.screen)
         self.carIconGroup.update(self.position_rounded[0], self.position_rounded[1], self.direction_radians)
-        
-        self.statsInfo["frames"] += 1
-        self.statsInfo["distance"] += speed_new
-        self.statsInfo["average speed"] = self.statsInfo["distance"] // self.statsInfo["frames"]
-        self.statsInfo["rotations"] += self.steering_radians / (2 * math.pi)
-        self.statsInfo["CAR_SPEED_MIN"] = CAR_SPEED_MIN
-        self.statsInfo["CAR_SPEED_MAX"] = CAR_SPEED_MAX
 
-        self.instructions = {
-            "speed":self.speed,
-            "speed_delta":speed_delta,
-            "direction_radians":self.direction_radians,
-            "steering_radians":self.steering_radians,
-            "track_edge_distances":track_edge_distances
-            }
-        self.latestInstructions.appendleft(self.instructions)
+    def UpdateVisited(self):
+        # update a 2d subarray of visited that's +/- 10 from the current position
+        self.visited[self.position_rounded[0]-CAR_VISITED_PATH_RADIUS:self.position_rounded[0]+CAR_VISITED_PATH_RADIUS, self.position_rounded[1]-CAR_VISITED_PATH_RADIUS:self.position_rounded[1]+CAR_VISITED_PATH_RADIUS] = True
 
+    def CheckIfWon(self):
+        if -2 < self.position[0]/SQUARE_SIZE-COLS < -1 and -2 < self.position[1]/SQUARE_SIZE-ROWS < -1:
+            self.won = True
+            return True
+        else:
+            return False
+
+    def CheckIfDeadEnd(self, track_edge_distances):
+        # if any of the distances is more than 2/3 of the size of a square, then it's not a dead end
+        for ted in track_edge_distances:
+            if -90<=ted[0]<=90 and ted[1] > SQUARE_SIZE * 2 / 3:
+                return False
+
+        return True
+    
     def GetTrackEdgeDistances(self, draw_lines):    
         car_on_track = self.track.track_pixels[self.position_rounded]
         if not car_on_track:
             self.crashed = True
-            self.DrawCrashedCar()
+            self.DrawCarFinishLocation(RED)
             return NULL
 
         # list of tuples: [(angle,distance)]
         track_edge_distances = []
 
         for vision_angle in CAR_VISION_ANGLES:
-            track_edge_distance = self.GetTrackEdgeDistance(vision_angle, draw_lines)
-            track_edge_distances.append((vision_angle, track_edge_distance))
+            track_edge_distance, visited_count = self.GetTrackEdgeDistance(vision_angle, draw_lines)
+            track_edge_distances.append((vision_angle, track_edge_distance, visited_count))
 
         #if draw_lines is True:
         pygame.display.update()
         
-        self.crashed = False
+        #self.crashed = False
         return track_edge_distances
     
     def GetTrackEdgeDistance(self, vision_angle, draw_line):
@@ -326,6 +360,7 @@ class Car():
 
         test_x, test_y = self.position_rounded
         edge_distance = 0
+        visited_count = 0
 
         for i in range(1, CAR_VISION_DISTANCE):
             edge_distance = i
@@ -333,16 +368,20 @@ class Car():
             test_y += delta_y
             if self.track.track_pixels[round(test_x)][round(test_y)] == False:
                 break
+            if i>10 and self.visited[round(test_x)][round(test_y)] == True:
+                visited_count += 1 
         
-        if draw_line:
-            pygame.draw.line(self.screen, RED, self.position_rounded, [round(test_x), round(test_y)])
+        #edge_distance -= 1.2 * visited_count
 
-        return edge_distance
+        if draw_line:
+            pygame.draw.line(self.trackDistancesScreen, RED, self.position_rounded, [round(test_x), round(test_y)])
+
+        return edge_distance, visited_count
     
-    def DrawCrashedCar(self):
-        pygame.draw.circle(self.screen, RED, self.position_rounded, TRACK_MAX_WIDTH, width=2)
-        crash_zone = pygame.Rect(self.position_rounded[0] - TRACK_MAX_WIDTH, self.position_rounded[1] - TRACK_MAX_WIDTH, 2 * TRACK_MAX_WIDTH, 2 * TRACK_MAX_WIDTH)
-        pygame.display.update(crash_zone)
+    def DrawCarFinishLocation(self, highlight_colour):
+        pygame.draw.circle(self.screen, highlight_colour, self.position_rounded, TRACK_MAX_WIDTH, width=2)
+        finish_zone = pygame.Rect(self.position_rounded[0] - TRACK_MAX_WIDTH, self.position_rounded[1] - TRACK_MAX_WIDTH, 2 * TRACK_MAX_WIDTH, 2 * TRACK_MAX_WIDTH)
+        pygame.display.update(finish_zone)
 
 class Track():
     def __init__(self, window_size, track_surface) -> None:
@@ -387,9 +426,6 @@ class Track():
         maze[maze.shape[0]-2][maze.shape[1]-2] = maze[maze.shape[0]-2][maze.shape[1]-2]/2
         return maze
 
-    #def GetScaledMaze(maze):    
-    #    return [[t[0] * SQUARE_SIZE,t[1] * SQUARE_SIZE] for t in maze]
-
     def SetScaledMazeSurface(self, maze):
         # draw the track in lots of red circles on a black surface
         surf = pygame.Surface((COLS,ROWS))
@@ -417,170 +453,7 @@ class Track():
         self.track_pixels = tp.astype(dtype=bool)
         return track_pixels_surface
 
-    def GetNewTrack(self):
-        # python version of the answer to this 
-        # https://answers.unity.com/questions/394991/generate-closed-random-path-in-c.html
-        
-        start_row = random.randint(1, COLS-2)
-        start_col = random.randint(1, ROWS-2)
-        
-        # create a list of the coordinates of 4 central points that make up a square
-        track = [(start_row,start_col),(start_row+1,start_col),(start_row+1,start_col+1),(start_row,start_col+1)]
-        
-        # create 2D array of booleans for the vertices in the grid
-        # Elements will be set to True to indicate the vertex is part of the track and so the track can't be expanded into it
-        # Elements around the outside are also set to True, so that the track won't expand all the way to the edge
-        # https://stackoverflow.com/questions/13614452/python-multidimensional-boolean-array
-        grid_vertices = np.zeros((COLS+1,ROWS+1), dtype=bool)   
 
-        # set the first and last rows
-        for i in range(COLS):
-            grid_vertices[i][0] = True        
-            grid_vertices[i][ROWS] = True
-    
-        # set the first and last columns
-        for i in range(1, ROWS-1):
-            grid_vertices[0][i] = True        
-            grid_vertices[COLS][i] = True
-
-        # set the grid vertices for the starting square of track
-        for track_vertex in track:
-            grid_vertices[track_vertex] = True
-
-        # keep expanding the track until it won't expand any more
-        while True:
-            # get a random track segment to expand but, if that won't expand, need to get another until all have been tested.
-            # so, get a randomly sorted list of indices and work through the segments indexed by them until a segment can be expanded or none can be expanded and end the loop
-            track_len = len(track)
-            shuffled_indices = list(range(0,track_len))
-            random.shuffle(shuffled_indices)
-
-            # loop though the shuffled_indices until a segment can be expanded or all have been tried
-            for track_segment_start_index in shuffled_indices:
-                track_segment_end_index = track_segment_start_index + 1
-                if track_segment_end_index > track_len-1:
-                    track_segment_end_index = 0
-
-                track_segment_start = track[track_segment_start_index]
-                track_segment_end = track[track_segment_end_index]
-
-                track_segment_start_x, track_segment_start_y = track_segment_start
-                track_segment_end_x, track_segment_end_y = track_segment_end
-                
-                # the track started off going round clockwise and so always will
-                # the track should expand outwards, which is always to the left of the current track segment (when looking from the start of the segment to the end of it)
-                # coordinates start (0,0) at the top left
-                # if the segment goes left to right, it will expand upwards and y will decrease by 1
-                # if the segment goes up to down, it will expand to the right and x will increase by 1
-                # if the segment goes right to left, it will expand downwards and y will increase by 1
-                # if the segment goes down to up, it will expand to the left and x wil decrease by 1
-
-                delta_x = track_segment_end_y - track_segment_start_y
-                delta_y = track_segment_start_x - track_segment_end_x
-                
-                track_vertex_extra_1 = (track_segment_start_x + delta_x, track_segment_start_y + delta_y)
-                # check if this is already in use
-                if grid_vertices[track_vertex_extra_1]:
-                    # in use, so can't expand this segment
-                    continue
-
-                track_vertex_extra_2 = (track_segment_end_x + delta_x, track_segment_end_y + delta_y)
-                # check if this is already in use
-                if grid_vertices[track_vertex_extra_2]:
-                    # in use, so can't expand this segment
-                    continue
-
-                # neither new vertex has been used by the track, so insert the new vertices after the start one
-                # this method inserts a list (the 2 new vertices) into the track before the vertex for the end of the segment
-                track[track_segment_end_index:track_segment_end_index] = [track_vertex_extra_1,track_vertex_extra_2]
-
-                # flag that the new vertices are part of the track
-                grid_vertices[track_vertex_extra_1] = True
-                grid_vertices[track_vertex_extra_2] = True                
-                # if the track has been expanded at this segment, break from this loop
-                break
-            else:
-                # gone through all of the track segments and the track wasn't expanded, so stop trying to expand it any more
-                break
-        
-        self.track = track
-
-    def SetScaledTrack(self):    
-        self.scaled_track = [[t[0] * SQUARE_SIZE,t[1] * SQUARE_SIZE] for t in self.track]
-
-    def DrawTrackStart(self):
-        pygame.draw.circle(self.track_surface, START_COLOUR, self.scaled_track[0], TRACK_MAX_WIDTH + 5)
-
-    def DrawTrack(self):
-        pygame.draw.lines(self.track_surface, BLACK, True, self.scaled_track, 1)
-
-    def SetInterpolatedScaledTrack(self):
-        # https://stackoverflow.com/questions/31464345/fitting-a-closed-curve-to-a-set-of-points
-        
-        # loop the track back round to the strart
-        interpolated_scaled_track = self.scaled_track + [self.scaled_track[0]]
-
-        # change the list of coordinates to a numpy array
-        pts = np.array(interpolated_scaled_track)
-
-        # magic happens
-        tck, u = splprep(pts.T, u=None, s=0.0, per=1) 
-        u_new = np.linspace(u.min(), u.max(), TRACK_CURVE_POINTS)
-        x_new, y_new = splev(u_new, tck, der=0)
-
-        self.interpolated_scaled_track = [list(a) for a in zip(x_new , y_new)]
-
-    def SetTrackWidths(self):
-        # track width should vary between TRACK_MIN_WIDTH to TRACK_MAX_WIDTH
-        # to get the width to vary smoothly but randomly, a random walk is created and then smoothed over 20 points, normalised to the range [0,1] and scaled
-        # the width starts at TRACK_MIN_WIDTH. If the end of the track is wide, it can cause problems with driving when it loops round to the narrow start.
-        # The list of widths could be halved in length and mirrored, so that the end is the same width as the start, but this makes for an extra challenge.
-        x = np.linspace(0, TRACK_CURVE_POINTS, TRACK_CURVE_POINTS)
-
-        def RandomWalk(x):
-            y = 0
-            result = []
-            for _ in x:
-                result.append(y)
-                y += np.random.normal(scale=1)
-            return np.array(result)
-
-        def NormalizeData(data):
-            return (data - np.min(data)) / (np.max(data) - np.min(data))
-
-        track_width = uniform_filter1d(RandomWalk(x), size=20)
-        track_width = (TRACK_MAX_WIDTH - TRACK_MIN_WIDTH) * NormalizeData(track_width) + TRACK_MIN_WIDTH
-        self.track_widths = track_width
-    
-    def SetTrackPixels(self):
-        # draw the track in lots of red circles on a black surface
-        surf = pygame.Surface(self.window)
-        surf.fill(BLACK)
-        for i in range(0, len(self.interpolated_scaled_track)):
-            pygame.draw.circle(surf, RED, self.interpolated_scaled_track[i], self.track_widths[i])
-        
-        # get an array from the screen identifying where the track is
-        tp = pygame.surfarray.array_red(surf)
-        # reduce this down to an array of booleans where 255 becomes True
-        self.track_pixels = tp.astype(dtype=bool)
-
-    def DrawInterpolatedTrack(self):
-        # now make the track look nice
-        self.track_surface.fill(WHITE)
-
-        self.DrawTrackStart()
-
-        # draw lots of black circles of varying widths to create a smooth track that matches the backing array track_pixels
-        for i in range(0, len(self.interpolated_scaled_track)):
-            pygame.draw.circle(self.track_surface, BLACK, self.interpolated_scaled_track[i], self.track_widths[i])
-            
-        # draw track centre line
-        #for t in self.scaled_track:
-        #    self.screen.set_at((round(t[0]),round(t[1])), TRACK_MIDLINE_COLOUR)
-
-    def GetInitialDirectionRadians(self):
-        initial_angle = math.atan2(self.track[1][1]-self.track[0][1], self.track[1][0]-self.track[0][0])
-        return initial_angle
 
 def StatsUpdate(statsSurface, statsInfo):
     statsSurface.fill((0, 0, 0, 0))
@@ -593,7 +466,6 @@ def StatsUpdate(statsSurface, statsInfo):
         imgSize = img.get_size()
         textTop += imgSize[1] + 10
         statsSurface.blit(img, (10,textTop))
-
 
 # define a main function
 def main():
@@ -614,6 +486,10 @@ def main():
     # create a surface on screen that has the size defined globally
     screen = pygame.display.set_mode(window_size)
     background = pygame.Surface(window_size)
+    visitedByCarScreen = pygame.Surface(window_size)
+    trackDistancesScreen = pygame.Surface(window_size, pygame.SRCALPHA, 32)
+    trackDistancesScreen = trackDistancesScreen.convert_alpha()
+    trackDistancesScreenCopy = trackDistancesScreen.copy()
     statsSurface = pygame.Surface(window_size)
     statsSurface = statsSurface.convert_alpha()
     statsSurface.fill((0, 0, 0, 0))
@@ -631,7 +507,7 @@ def main():
             CAR_SPEED_MAX = CAR_SPEED_MAX_INITIAL # pixels per frame
             track = Track(window_size, background)
             track.Create()
-            car = Car(background, track)            
+            car = Car(background, visitedByCarScreen, trackDistancesScreen, track)            
             newTrackAndCarNeeded = False
 
         # event handling, gets all event from the event queue
@@ -675,14 +551,16 @@ def main():
         if paused:
              continue
 
-        if not car.crashed:
+        if not car.crashed and not car.won:
             car.Drive()
             StatsUpdate(statsSurface, car.statsInfo)   
         
+        pygame.display.flip()
         screen.blit(background, (0,0))
+        screen.blit(car.trackDistancesScreen, (0,0))
+        car.trackDistancesScreen = trackDistancesScreenCopy.copy() # clear this surface
         car.carIconGroup.draw(screen)
         screen.blit(statsSurface, (0,0))
-        pygame.display.flip()
         clock.tick(200)
 
 
