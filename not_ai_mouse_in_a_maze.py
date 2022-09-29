@@ -32,16 +32,17 @@ TRACK_MIN_WIDTH = 15
 TRACK_MAX_WIDTH = 42
 TRACK_CURVE_POINTS = ROWS * COLS * SQUARE_SIZE // 5
 TRACK_MIDLINE_COLOUR = WHITE
+TRACK_MAX_DISTANCE_TO_COMPLETE = ROWS * COLS * SQUARE_SIZE # car will "crash" if it takes more than this distance to complete the maze
 
 WINDOW_WIDTH = COLS * SQUARE_SIZE
 WINDOW_HEIGHT = ROWS * SQUARE_SIZE
 
 # cars can only look so far ahead. Needs to be somewhat larger than the maximum track width - try seting that distance to the size of a grid square
-CAR_VISION_DISTANCE = round(3.0 * SQUARE_SIZE)
-#CAR_VISION_ANGLES = (0, -10, 10, -20, 20, -30, 30, -45, 45, -60, 60, -80, 80, -90, 90) # 0 must be first
-CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -60, 60, -90, 90) # 0 must be first
+CAR_VISION_DISTANCE = round(2.0 * SQUARE_SIZE)
+#CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -60, 60, -90, 90) # 0 must be first
+CAR_VISION_ANGLES = (0, -20, 20, -45, 45, -70, 70, -80, 80, -90, 90) # 0 must be first
 CAR_SPEED_MIN_INITIAL = 2 # pixels per frame
-CAR_SPEED_MAX_INITIAL = 7 # pixels per frame
+CAR_SPEED_MAX_INITIAL = 5 # pixels per frame
 CAR_SPEED_MIN = CAR_SPEED_MIN_INITIAL # pixels per frame
 CAR_SPEED_MAX = CAR_SPEED_MAX_INITIAL # pixels per frame
 CAR_ACCELERATION_MIN = -3 # change in speed in pixels per frame
@@ -52,6 +53,7 @@ CAR_PATH_COLOUR = RED
 CAR_COLOUR = GREEN
 CAR_VISITED_PATH_RADIUS = 25
 CAR_VISITED_PATH_AVOIDANCE_FACTOR = 0.8
+CAR_WHEN_TO_STEER_FACTOR = 1.5
 
 class Directions(Enum):
     UP = 1
@@ -197,11 +199,10 @@ class Car():
         self.position_previous_rounded = self.position_rounded
         self.visited = np.full(screen.get_size(), False)
         
-        self.statsInfo = {
+        self.statsInfoCar = {
             "distance":0.0,
             "frames":0,
             "average speed":0.0,
-            "rotations":0.0,
             "CAR_SPEED_MIN":CAR_SPEED_MIN,
             "CAR_SPEED_MAX":CAR_SPEED_MAX
             }
@@ -256,7 +257,7 @@ class Car():
             steering_radians_previous = self.steering_radians
             steering_angle_new = 0
             max_track_distance = 1
-            if distance_ahead < CAR_VISION_DISTANCE / 1.8:        
+            if distance_ahead < CAR_VISION_DISTANCE / CAR_WHEN_TO_STEER_FACTOR:        
                 for ted in track_edge_distances:
                     if ted[0] == 0:
                         continue
@@ -293,12 +294,17 @@ class Car():
 
             self.UpdateVisited()
 
-            self.statsInfo["frames"] += 1
-            self.statsInfo["distance"] += speed_new
-            self.statsInfo["average speed"] = self.statsInfo["distance"] // self.statsInfo["frames"]
-            self.statsInfo["rotations"] += self.steering_radians / (2 * math.pi)
-            self.statsInfo["CAR_SPEED_MIN"] = CAR_SPEED_MIN
-            self.statsInfo["CAR_SPEED_MAX"] = CAR_SPEED_MAX
+            # decided that the car has "crashed" if it has taken more than this distance to complete the maze
+            if self.statsInfoCar["distance"] > TRACK_MAX_DISTANCE_TO_COMPLETE:
+                self.crashed = True
+                self.DrawCarFinishLocation(RED)
+                return
+
+            self.statsInfoCar["frames"] += 1
+            self.statsInfoCar["distance"] += speed_new
+            self.statsInfoCar["average speed"] = self.statsInfoCar["distance"] // self.statsInfoCar["frames"]
+            self.statsInfoCar["CAR_SPEED_MIN"] = CAR_SPEED_MIN
+            self.statsInfoCar["CAR_SPEED_MAX"] = CAR_SPEED_MAX
         
             self.instructions = {
                 "speed":self.speed,
@@ -315,6 +321,7 @@ class Car():
     def UpdateVisited(self):
         # update a 2d subarray of visited that's +/- 10 from the current position
         self.visited[self.position_rounded[0]-CAR_VISITED_PATH_RADIUS:self.position_rounded[0]+CAR_VISITED_PATH_RADIUS, self.position_rounded[1]-CAR_VISITED_PATH_RADIUS:self.position_rounded[1]+CAR_VISITED_PATH_RADIUS] = True
+        pygame.draw.circle(self.visitedByCarScreen, (0,0,0,40), self.position_previous_rounded, CAR_VISITED_PATH_RADIUS)
 
     def CheckIfWon(self):
         if -2 < self.position[0]/SQUARE_SIZE-COLS < -1 and -2 < self.position[1]/SQUARE_SIZE-ROWS < -1:
@@ -455,10 +462,12 @@ class Track():
 
 
 
-def StatsUpdate(statsSurface, statsInfo):
+def StatsUpdate(statsSurface, statsInfoCar, statsInfoGlobal):
     statsSurface.fill((0, 0, 0, 0))
     font = pygame.font.SysFont('Arial', 12, bold=False)
     textTop = 0
+    statsInfo = statsInfoCar.copy()
+    statsInfo.update(statsInfoGlobal)
     for k,v in statsInfo.items():
         img = font.render(k + ': ' + str(round(v)), True,
                   pygame.Color(BLACK),
@@ -486,10 +495,15 @@ def main():
     # create a surface on screen that has the size defined globally
     screen = pygame.display.set_mode(window_size)
     background = pygame.Surface(window_size)
-    visitedByCarScreen = pygame.Surface(window_size)
+
+    visitedByCarScreen = pygame.Surface(window_size, pygame.SRCALPHA, 32)
+    visitedByCarScreen = visitedByCarScreen.convert_alpha()
+    visitedByCarScreenCopy = visitedByCarScreen.copy()
+
     trackDistancesScreen = pygame.Surface(window_size, pygame.SRCALPHA, 32)
     trackDistancesScreen = trackDistancesScreen.convert_alpha()
     trackDistancesScreenCopy = trackDistancesScreen.copy()
+    
     statsSurface = pygame.Surface(window_size)
     statsSurface = statsSurface.convert_alpha()
     statsSurface.fill((0, 0, 0, 0))
@@ -498,15 +512,34 @@ def main():
     running = True
     paused = False
     newTrackAndCarNeeded = True
+    statsInfoGlobal = {
+        "SuccessCount" : 0,
+        "MaxSuccessesInARow" : 0,
+        "Total frames" : 0
+    }
 
     # main loop
     while running:
+        statsInfoGlobal["Total frames"] += 1
         if newTrackAndCarNeeded:
             # create the track and draw it on the background
+            try:
+                car
+            except NameError:
+                car_exists = False
+            else:
+                if car.won:
+                    statsInfoGlobal["SuccessCount"] += 1
+                    statsInfoGlobal["MaxSuccessesInARow"] = max(statsInfoGlobal["MaxSuccessesInARow"],statsInfoGlobal["SuccessCount"])
+                elif car.crashed:
+                    statsInfoGlobal["MaxSuccessesInARow"] = max(statsInfoGlobal["MaxSuccessesInARow"],statsInfoGlobal["SuccessCount"])
+                    statsInfoGlobal["SuccessCount"] = 0
+
             CAR_SPEED_MIN = CAR_SPEED_MIN_INITIAL # pixels per frame
             CAR_SPEED_MAX = CAR_SPEED_MAX_INITIAL # pixels per frame
             track = Track(window_size, background)
             track.Create()
+            visitedByCarScreen = visitedByCarScreenCopy.copy() # clear this surface
             car = Car(background, visitedByCarScreen, trackDistancesScreen, track)            
             newTrackAndCarNeeded = False
 
@@ -553,16 +586,21 @@ def main():
 
         if not car.crashed and not car.won:
             car.Drive()
-            StatsUpdate(statsSurface, car.statsInfo)   
+            StatsUpdate(statsSurface, car.statsInfoCar, statsInfoGlobal)
         
         pygame.display.flip()
         screen.blit(background, (0,0))
+        screen.blit(visitedByCarScreen, (0,0))
         screen.blit(car.trackDistancesScreen, (0,0))
         car.trackDistancesScreen = trackDistancesScreenCopy.copy() # clear this surface
         car.carIconGroup.draw(screen)
         screen.blit(statsSurface, (0,0))
-        clock.tick(200)
+        pygame.display.update()
+        clock.tick(400)
 
+        if car.crashed or car.won:
+            newTrackAndCarNeeded = True
+            pygame.time.wait(2000)
 
 # run the main function only if this module is executed as the main script
 # (if you import this as a module then nothing is executed)
