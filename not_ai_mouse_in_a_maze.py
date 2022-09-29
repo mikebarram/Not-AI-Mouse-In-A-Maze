@@ -36,13 +36,14 @@ sys.setrecursionlimit(8000)
 
 BLACK = (0, 0, 0)
 WHITE = (200, 200, 200)
+PURE_WHITE = (255, 255, 255)
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 SQUARE_SIZE = 70
 ROWS = 13
 COLS = 19
-# car will "crash" if it takes more than this distance to complete the maze
-TRACK_MAX_DISTANCE_TO_COMPLETE = ROWS * COLS * SQUARE_SIZE**1.5
+# mouse will "crash" if it takes more than this distance to complete the maze
+MAZE_MAX_DISTANCE_TO_COMPLETE = ROWS * COLS * SQUARE_SIZE**1.5
 # mazes that the mouse fails to solve are saved here.
 # Any mazes in here are reloaded at the start of session.
 MAZE_DIRECTORY = f"mazes\\{COLS}x{ROWS}\\"
@@ -73,40 +74,19 @@ CAR_STEERING_RADIANS_MAX = math.radians(45)
 CAR_STEERING_RADIANS_DELTA_MAX = math.radians(45)
 CAR_STEERING_MULTIPLIER = 2.5
 CAR_VISITED_PATH_RADIUS = 20
+CAR_TRAIL_CIRCLE_ALPHA = None
 # how much wider the maze is than the path
 CAR_VISITED_PATH_AVOIDANCE_FACTOR = 1.25 * SQUARE_SIZE / (2 * CAR_VISITED_PATH_RADIUS)
 # the bigger the maze, the longer it could be before returning to a visited bit of maze
 FRAMES_BETWEEN_BLURRING_VISITED = (ROWS * COLS) // 10
-FRAME_DISPLAY_RATE = 2000
+FRAME_DISPLAY_RATE = 500
 
 
-def create_trail_circle_alpha(circle_radius, trail_alpha):
-    """create a 2D array of integers that have a given value if they are in a circle,
-    otherwise they are zero, except for those around the edge of the circle"""
-    x_list = np.arange(-CAR_VISITED_PATH_RADIUS, CAR_VISITED_PATH_RADIUS)
-    y_list = np.arange(-CAR_VISITED_PATH_RADIUS, CAR_VISITED_PATH_RADIUS)
-    array_alpha = np.zeros((y_list.size, x_list.size), dtype=np.int16)
-
-    # the circle will mostly have opacity trail_alpha
-    # but be 1/3 and 2/3 that around the outside
-    mask_outer = (x_list[np.newaxis, :]) ** 2 + (
-        y_list[:, np.newaxis]
-    ) ** 2 < circle_radius**2
-    mask_middle = (x_list[np.newaxis, :]) ** 2 + (y_list[:, np.newaxis]) ** 2 < (
-        circle_radius - 4
-    ) ** 2
-    mask_inner = (x_list[np.newaxis, :]) ** 2 + (y_list[:, np.newaxis]) ** 2 < (
-        circle_radius - 8
-    ) ** 2
-
-    array_alpha[mask_outer] = trail_alpha // 3
-    array_alpha[mask_middle] = (2 * trail_alpha) // 3
-    array_alpha[mask_inner] = trail_alpha
-
-    return array_alpha
-
-
-CAR_TRAIL_CIRCLE_ALPHA = create_trail_circle_alpha(CAR_VISITED_PATH_RADIUS, 10)
+@staticmethod
+def scale_2d_np_array(array_in, scale_factor):
+    """scale a 2d numpy array by the same factor in both directions"""
+    # from https://stackoverflow.com/a/4227280
+    return np.repeat(np.repeat(array_in, scale_factor, axis=0), scale_factor, axis=1)
 
 
 class Directions(Enum):
@@ -119,10 +99,10 @@ class Directions(Enum):
 
 
 class Backtracking:
-    """create a maze using the backtracking algorithm"""
+    """backtracking algorithm for creating a maze"""
 
     def __init__(self, height, width):
-        '''heigth and width of maze should be odd, so add one if even'''
+        """heigth and width of maze should be odd, so add one if even"""
         if width % 2 == 0:
             width += 1
         if height % 2 == 0:
@@ -151,8 +131,6 @@ class Backtracking:
             for j in range(self.width):
                 if maze[i, j] == 0.5:
                     maze[i, j] = 1
-
-        maze = maze * 255.0
 
         return maze
 
@@ -201,25 +179,21 @@ class Backtracking:
 class Maze:
     """create and manage mazes"""
 
-    def __init__(self, window_size, track_surface) -> None:
-        self.window_size = window_size
-        self.track_surface = track_surface
-        self.track = []
-        self.scaled_track = []
-        self.interpolated_scaled_track = []
-        self.track_widths = []
-        self.track_pixels = []
-        self.maze = []
-        self.from_saved = False
+    def __init__(self, rows, cols) -> None:
+        self.rows = rows
+        self.cols = cols
+        self.maze_title = None
+        self.maze_tiny = []
+        self.maze_big = []
+        self.from_saved = None
 
     def create(self):
         """create a new maze"""
-        pygame.display.set_caption("New maze")
-        maze = self.get_new_maze()
-        maze = self.set_maze_end_points(maze)
-        self.maze = maze
-        self.set_scaled_maze_surface(maze)
-        self.track_surface = self.set_track_pixels_from_maze_surface(self.track_surface)
+        self.maze_title = "New maze"
+        self.from_saved = False
+        self.maze_tiny = self.get_new_maze()
+        maze_bool = self.maze_tiny.astype(dtype=bool)
+        self.maze_big = self.stretch_maze(maze_bool)
 
     def save(self, timestamp):
         """save a maze. It will save to a folder based on the height and width of the
@@ -228,21 +202,21 @@ class Maze:
         if timestamp:
             timestr = time.strftime("%Y%m%d-%H%M%S")
             filename = MAZE_DIRECTORY + "maze_" + timestr + ".txt"
-        np.savetxt(filename, self.maze, fmt="%s")
+        np.savetxt(filename, self.maze_tiny, fmt="%s")
 
     def load(self, filename):
         """load a previously saved maze"""
-        pygame.display.set_caption("Maze: " + filename)
-        maze = np.loadtxt(filename, dtype=np.float32)
-        self.maze = maze
-        self.set_scaled_maze_surface(maze)
-        self.track_surface = self.set_track_pixels_from_maze_surface(self.track_surface)
+        self.maze_title = "Maze: " + filename
         self.from_saved = True
+        self.file_name = filename
+        self.maze_tiny = np.loadtxt(filename, dtype=np.int)
+        maze_bool = self.maze_tiny.astype(dtype=bool)
+        self.maze_big = self.stretch_maze(maze_bool)
 
     def get_new_maze(self):
         """get a new maze"""
-        maze_height = ROWS + 1
-        maze_width = COLS + 1
+        maze_height = self.rows + 1
+        maze_width = self.cols + 1
 
         backtracking = Backtracking(maze_height, maze_width)
         maze = backtracking.create_maze()
@@ -252,46 +226,45 @@ class Maze:
 
         return maze
 
-    def set_maze_end_points(self, maze):
-        """change the values of the maze array for the elements that represent
-        the start and end of the maze"""
-        maze[1][1] = maze[1][1] / 2
-        maze[maze.shape[0] - 2][maze.shape[1] - 2] = (
-            maze[maze.shape[0] - 2][maze.shape[1] - 2] / 2
+    def stretch_maze(self, tiny_maze):
+        """stretch maze"""
+        tiny_maze = np.swapaxes(tiny_maze, 1, 0)
+        return scale_2d_np_array(tiny_maze, SQUARE_SIZE)
+
+
+class MazeDrawer:
+    """draw the maze with pygame and add graphical elements like the start and finish"""
+
+    def __init__(self, maze, window_size, maze_surface) -> None:
+        self.maze = maze
+        self.window_size = window_size
+        self.maze_surface = maze_surface
+
+    def draw_start(self, maze_surface, square_size, start_colour):
+        rect_start = pygame.Rect(
+            square_size, square_size, square_size, square_size
         )
-        return maze
+        pygame.draw.rect(maze_surface, start_colour, rect_start)
 
-    def set_scaled_maze_surface(self, maze):
-        """create a tiny maze with just one pixel per segment of the maze"""
-        surf = pygame.Surface((COLS, ROWS))
-        surf.fill(BLACK)
-        for i in range(0, maze.shape[1]):
-            for j in range(0, maze.shape[0]):
-                # r = pygame.Rect(i,j,1,1)
-                colour_val = round(maze[j][i])
-                # pygame.draw.rect(surf, (colour_val,0,0), r)
-                surf.set_at((i, j), (colour_val, colour_val, colour_val))
-
-        pygame.transform.scale(surf, self.window_size, self.track_surface)
-
-    def set_track_pixels_from_maze_surface(self, maze_surface):
-        """set the maze's pixels"""
-        track_pixels_surface = pygame.Surface(self.window_size)
-        pygame.transform.threshold(
-            track_pixels_surface,
-            maze_surface,
-            search_color=(255, 255, 255),
-            threshold=(128, 128, 128),
-            set_color=(255, 0, 0),
-            set_behavior=1,
-            inverse_set=True,
+    def draw_finish(self, window_size, maze_surface, square_size, finish_colour):
+        rect_finish = pygame.Rect(
+            window_size[0] - 2 * square_size,
+            window_size[1] - 2 * square_size,
+            square_size,
+            square_size,
         )
+        pygame.draw.rect(maze_surface, finish_colour, rect_finish)
 
-        # get an array from the screen identifying where the track is
-        track_pixel = pygame.surfarray.pixels_red(track_pixels_surface)
-        # reduce this down to an array of booleans where 255 becomes True
-        self.track_pixels = track_pixel.astype(dtype=bool)
-        return track_pixels_surface
+    def draw_maze(self, maze_tiny, wall_colour, passage_colour):
+        """create a tiny maze with just one pixel per segment of the maze, then scale it up"""
+        surf = pygame.Surface((self.maze.cols, self.maze.rows))
+        surf.fill(wall_colour)  # BLACK
+        for i in range(0, maze_tiny.shape[1]):
+            for j in range(0, maze_tiny.shape[0]):
+                if maze_tiny[j][i] == 0:
+                    surf.set_at((i, j), passage_colour)
+
+        pygame.transform.scale(surf, self.window_size, self.maze_surface)
 
 
 class MouseIcon(pygame.sprite.Sprite):
@@ -324,15 +297,15 @@ class MouseIcon(pygame.sprite.Sprite):
 class Mouse:
     """a mouse"""
 
-    def __init__(self, screen, visited_by_car_screen, track_distances_screen, track):
+    def __init__(self, screen, visited_by_mouse_screen, maze_wall_distances_screen, maze_big):
         self.screen = screen
-        self.visited_by_car_screen = visited_by_car_screen
-        self.track_distances_screen = track_distances_screen
-        self.track = track
+        self.visited_by_mouse_screen = visited_by_mouse_screen
+        self.maze_wall_distances_screen = maze_wall_distances_screen
+        self.maze_big = maze_big
 
         # actual position is recorded as a tuple of floats
         # position is rounded just for display
-        # and to see if the car is still on the track
+        # and to see if the mouse is still on the maze
         # starting position is in the middle of top left square inside the border
         self.position = (SQUARE_SIZE * 1.5, SQUARE_SIZE * 1.5)
         self.position_rounded = (round(self.position[0]), round(self.position[1]))
@@ -348,7 +321,7 @@ class Mouse:
         self.position_previous_rounded = self.position_rounded
         self.visited_alpha = np.zeros(screen.get_size(), dtype=np.int16)
 
-        self.stats_info_car = {
+        self.stats_info_mouse = {
             "distance": 0.0,
             "frames": 0,
             "average speed": 0.0,
@@ -365,9 +338,41 @@ class Mouse:
         # keep a list of the 20 last instructions, so we can see where it went wrong
         self.latest_instructions = deque(maxlen=20)
 
-        self.car_icon = MouseIcon(self.position_rounded[0], self.position_rounded[1])
-        self.car_icon_group = pygame.sprite.Group()
-        self.car_icon_group.add(self.car_icon)
+        self.mouse_icon = MouseIcon(self.position_rounded[0], self.position_rounded[1])
+        self.mouse_icon_group = pygame.sprite.Group()
+        self.mouse_icon_group.add(self.mouse_icon)
+
+        global CAR_TRAIL_CIRCLE_ALPHA
+        if CAR_TRAIL_CIRCLE_ALPHA is None:
+            CAR_TRAIL_CIRCLE_ALPHA = self.create_trail_circle_alpha(
+                CAR_VISITED_PATH_RADIUS, 10
+            )
+
+    @staticmethod
+    def create_trail_circle_alpha(circle_radius, trail_alpha):
+        """create a 2D array of integers that have a given value if they are in a circle,
+        otherwise they are zero, except for those around the edge of the circle"""
+        x_list = np.arange(-CAR_VISITED_PATH_RADIUS, CAR_VISITED_PATH_RADIUS)
+        y_list = np.arange(-CAR_VISITED_PATH_RADIUS, CAR_VISITED_PATH_RADIUS)
+        array_alpha = np.zeros((y_list.size, x_list.size), dtype=np.int16)
+
+        # the circle will mostly have opacity trail_alpha
+        # but be 1/3 and 2/3 that around the outside
+        mask_outer = (x_list[np.newaxis, :]) ** 2 + (
+            y_list[:, np.newaxis]
+        ) ** 2 < circle_radius**2
+        mask_middle = (x_list[np.newaxis, :]) ** 2 + (y_list[:, np.newaxis]) ** 2 < (
+            circle_radius - 4
+        ) ** 2
+        mask_inner = (x_list[np.newaxis, :]) ** 2 + (y_list[:, np.newaxis]) ** 2 < (
+            circle_radius - 8
+        ) ** 2
+
+        array_alpha[mask_outer] = trail_alpha // 3
+        array_alpha[mask_middle] = (2 * trail_alpha) // 3
+        array_alpha[mask_inner] = trail_alpha
+
+        return array_alpha
 
     def speed_increase(self):
         """increase speed by 1 pixel per frame"""
@@ -381,7 +386,7 @@ class Mouse:
 
     def drive(self, draw_frame):
         """to be called every frame to move the mouse along"""
-        track_edge_distances, whiskers = self.get_track_edge_distances()
+        maze_wall_distances, whiskers = self.get_maze_wall_distances()
 
         if self.crashed:
             return
@@ -396,28 +401,28 @@ class Mouse:
 
         self.position_previous_rounded = self.position_rounded
 
-        is_dead_end = self.check_if_dead_end(track_edge_distances)
+        is_dead_end = self.check_if_dead_end(maze_wall_distances)
 
         steering_radians_previous = self.steering_radians
         new_steering_angle = 0
         new_steering_radians = 0
-        max_track_distance = 1
-        min_track_distance = 1000
+        max_maze_distance = 1
+        min_maze_distance = 1000
 
         if is_dead_end:
             # old code from maze v3 that doesn't take into account
             # whether pixels have been visited
-            for ted in track_edge_distances:
+            for ted in maze_wall_distances:
                 if ted[0][0] == 0:
                     continue
 
                 new_steering_angle += ted[1] * ted[0][1]
-                if ted[1] > max_track_distance:
-                    max_track_distance = ted[1]
+                if ted[1] > max_maze_distance:
+                    max_maze_distance = ted[1]
 
-            new_steering_radians = 5 * new_steering_angle / max_track_distance
+            new_steering_radians = 5 * new_steering_angle / max_maze_distance
         else:
-            for ted in track_edge_distances:
+            for ted in maze_wall_distances:
                 if ted[0][0] == 0:
                     continue
 
@@ -433,13 +438,13 @@ class Mouse:
                 )
 
                 new_steering_angle += distance_for_angle * ted[0][1]
-                if distance_for_angle > max_track_distance:
-                    max_track_distance = distance_for_angle
-                if distance_for_angle < min_track_distance:
-                    min_track_distance = distance_for_angle
+                if distance_for_angle > max_maze_distance:
+                    max_maze_distance = distance_for_angle
+                if distance_for_angle < min_maze_distance:
+                    min_maze_distance = distance_for_angle
 
             new_steering_radians = (
-                new_steering_angle * CAR_STEERING_MULTIPLIER / max_track_distance
+                new_steering_angle * CAR_STEERING_MULTIPLIER / max_maze_distance
             )
 
         # restrict how much the steering can be changed per frame
@@ -465,8 +470,8 @@ class Mouse:
             new_steering_radians = -CAR_STEERING_RADIANS_MAX
 
         new_direction_radians = self.direction_radians + new_steering_radians
-        (track_edge_distance, _, _, _, _,) = self.get_track_edge_distance(
-            self.track.track_pixels,
+        (maze_wall_distance, _, _, _, _,) = self.get_maze_wall_distance(
+            self.maze_big,
             self.visited_alpha,
             self.direction_radians,
             self.position_rounded[0],
@@ -474,7 +479,7 @@ class Mouse:
             new_steering_radians,
         )
 
-        speed_delta = 4 * (track_edge_distance / CAR_VISION_DISTANCE) - 2
+        speed_delta = 4 * (maze_wall_distance / CAR_VISION_DISTANCE) - 2
 
         if speed_delta < CAR_ACCELERATION_MIN:
             speed_delta = CAR_ACCELERATION_MIN
@@ -502,9 +507,9 @@ class Mouse:
         self.position = new_position
         self.position_rounded = (round(self.position[0]), round(self.position[1]))
 
-        car_speed_colour = round(255 * self.speed / self.speed_max)
-        car_colour = (255 - car_speed_colour, car_speed_colour, 0)
-        self.screen.set_at(self.position_rounded, car_colour)
+        mouse_speed_colour = round(255 * self.speed / self.speed_max)
+        mouse_colour = (255 - mouse_speed_colour, mouse_speed_colour, 0)
+        self.screen.set_at(self.position_rounded, mouse_colour)
 
         if draw_frame:
             pygame.display.update(
@@ -517,42 +522,42 @@ class Mouse:
         if draw_frame:
             # from https://github.com/pygame/pygame/issues/1244
             surface_alpha = np.array(
-                self.visited_by_car_screen.get_view("A"), copy=False
+                self.visited_by_mouse_screen.get_view("A"), copy=False
             )
             surface_alpha[:, :] = self.visited_alpha
 
-        # decided that the car has "crashed" if it has taken more than this
+        # decided that the mouse has "crashed" if it has taken more than this
         # distance to complete the maze - better to create a "crashed" status
-        if self.stats_info_car["distance"] > TRACK_MAX_DISTANCE_TO_COMPLETE:
+        if self.stats_info_mouse["distance"] > MAZE_MAX_DISTANCE_TO_COMPLETE:
             self.crashed = True
             self.draw_mouse_finish_location(RED)
             return
 
-        self.stats_info_car["frames"] += 1
-        self.stats_info_car["distance"] += new_speed
-        self.stats_info_car["average speed"] = (
-            self.stats_info_car["distance"] // self.stats_info_car["frames"]
+        self.stats_info_mouse["frames"] += 1
+        self.stats_info_mouse["distance"] += new_speed
+        self.stats_info_mouse["average speed"] = (
+            self.stats_info_mouse["distance"] // self.stats_info_mouse["frames"]
         )
-        self.stats_info_car["speed min"] = self.speed_min
-        self.stats_info_car["speed max"] = self.speed_max
+        self.stats_info_mouse["speed min"] = self.speed_min
+        self.stats_info_mouse["speed max"] = self.speed_max
 
         self.instructions = {
             "speed": self.speed,
             "speed_delta": speed_delta,
             "direction_radians": self.direction_radians,
             "steering_radians": self.steering_radians,
-            "track_edge_distances": track_edge_distances,
+            "maze_wall_distances": maze_wall_distances,
         }
         self.latest_instructions.appendleft(self.instructions)
 
         if draw_frame:
-            self.car_icon_group.update(
+            self.mouse_icon_group.update(
                 self.position_rounded[0],
                 self.position_rounded[1],
                 self.direction_radians,
             )
 
-        if self.stats_info_car["frames"] % FRAMES_BETWEEN_BLURRING_VISITED == 0:
+        if self.stats_info_mouse["frames"] % FRAMES_BETWEEN_BLURRING_VISITED == 0:
             self.fade_visited(self.visited_alpha)
 
     @staticmethod
@@ -606,37 +611,37 @@ class Mouse:
 
     @staticmethod
     # @jit(nopython=True)
-    def check_if_dead_end(track_edge_distances):
+    def check_if_dead_end(maze_wall_distances):
         """check if the mouse is in a dead end"""
         # if any of the distances is more than the size of a square,
         # then it's not a dead end
-        for ted in track_edge_distances:
+        for ted in maze_wall_distances:
             if math.pi / -2.0 <= ted[0][0] <= math.pi / 2.0 and ted[1] > SQUARE_SIZE:
                 return False
 
         return True
 
-    def get_track_edge_distances(self):
+    def get_maze_wall_distances(self):
         """get the distance of the mouse from the edges of the maze along
         a defined list of angles from its direction of travel"""
-        car_on_track = self.track.track_pixels[self.position_rounded]
-        if not car_on_track:
+        mouse_in_maze_passage = self.maze_big[self.position_rounded]
+        if not mouse_in_maze_passage:
             self.crashed = True
             self.draw_mouse_finish_location(RED)
             return [], []
 
-        track_edge_distances = []
+        maze_wall_distances = []
         whiskers = []
 
         for vision_angle_and_weight in CAR_VISION_ANGLES_AND_WEIGHTS:
             (
-                track_edge_distance,
+                maze_wall_distance,
                 visited_count,
                 visited_alpha_total,
                 edge_x,
                 edge_y,
-            ) = self.get_track_edge_distance(
-                self.track.track_pixels,
+            ) = self.get_maze_wall_distance(
+                self.maze_big,
                 self.visited_alpha,
                 self.direction_radians,
                 self.position_rounded[0],
@@ -645,21 +650,21 @@ class Mouse:
             )
             whiskers += [self.position_rounded, (edge_x, edge_y)]
 
-            track_edge_distances.append(
+            maze_wall_distances.append(
                 (
                     vision_angle_and_weight,
-                    track_edge_distance,
+                    maze_wall_distance,
                     visited_count,
                     visited_alpha_total,
                 )
             )
 
-        return track_edge_distances, whiskers
+        return maze_wall_distances, whiskers
 
     @staticmethod
     @jit(nopython=True)
-    def get_track_edge_distance(
-        track_pixels,
+    def get_maze_wall_distance(
+        maze_big,
         visited_alpha,
         direction_radians,
         position_rounded_x,
@@ -668,7 +673,7 @@ class Mouse:
     ):
         """get the distance of the mouse from the edges of the maze along a
         single angle from its direction of travel"""
-        # from x,y follow a line at vision_angle until no longer on the track
+        # from x,y follow a line at vision_angle until no longer on the maze passage
         # or until CAR_VISION_DISTANCE has been reached
         search_angle_radians = direction_radians + vision_angle
         delta_x = math.cos(search_angle_radians)
@@ -688,7 +693,7 @@ class Mouse:
             # improves performance of this function by ~5% and by ~3% overall
             test_x_round = round(test_x)
             test_y_round = round(test_y)
-            if track_pixels[test_x_round][test_y_round] is False:
+            if maze_big[test_x_round][test_y_round] is False:
                 break
 
             visited_alpha_pixel = visited_alpha[test_x_round, test_y_round]
@@ -706,8 +711,8 @@ class Mouse:
 
     def draw_lines_to_maze_edge(self, whiskers):
         """draw lines from the mouse to the edge of the maze"""
-        self.track_distances_screen.fill((0, 0, 0, 0))
-        pygame.draw.lines(self.track_distances_screen, WHITE, False, whiskers)
+        self.maze_wall_distances_screen.fill((0, 0, 0, 0))
+        pygame.draw.lines(self.maze_wall_distances_screen, WHITE, False, whiskers)
 
     def draw_mouse_finish_location(self, highlight_colour):
         """draw where the mouse finishes"""
@@ -724,13 +729,13 @@ class Mouse:
         pygame.display.update(finish_zone)
 
 
-def stats_update(stats_surface, stats_info_car, stats_info_global):
+def stats_update(stats_surface, stats_info_mouse, stats_info_global):
     """updates the stats surface with global and local stats"""
     stats_surface.fill((0, 0, 0, 0))
     font = pygame.font.SysFont("Arial", 12, bold=False)
     text_top = 0
 
-    for stats in (stats_info_car, stats_info_global):
+    for stats in (stats_info_mouse, stats_info_global):
         for stats_key, stats_value in stats.items():
             if stats_value > 10:
                 stats_value = round(stats_value)
@@ -756,7 +761,7 @@ def main():
     # load and set the logo
     logo = pygame.image.load("logo32x32.png")
     pygame.display.set_icon(logo)
-    pygame.display.set_caption("AI car")
+    pygame.display.set_caption("Not AI mouse")
 
     window_size = (WINDOW_WIDTH, WINDOW_HEIGHT)
 
@@ -764,12 +769,12 @@ def main():
     screen = pygame.display.set_mode(window_size)
     background = pygame.Surface(window_size)
 
-    visited_by_car_screen = pygame.Surface(window_size, pygame.SRCALPHA, 32)
-    visited_by_car_screen = visited_by_car_screen.convert_alpha()
-    visited_by_car_screen.fill((0, 0, 0, 0))
+    visited_by_mouse_screen = pygame.Surface(window_size, pygame.SRCALPHA, 32)
+    visited_by_mouse_screen = visited_by_mouse_screen.convert_alpha()
+    visited_by_mouse_screen.fill((0, 0, 0, 0))
 
-    track_distances_screen = pygame.Surface(window_size, pygame.SRCALPHA, 32)
-    track_distances_screen = track_distances_screen.convert_alpha()
+    maze_wall_distances_screen = pygame.Surface(window_size, pygame.SRCALPHA, 32)
+    maze_wall_distances_screen = maze_wall_distances_screen.convert_alpha()
 
     stats_surface = pygame.Surface(window_size)
     stats_surface = stats_surface.convert_alpha()
@@ -779,7 +784,7 @@ def main():
     running = True
     paused = False
     draw_frame = False
-    new_track_and_car_needed = True
+    new_maze_and_mouse_needed = True
     if not os.path.exists(MAZE_DIRECTORY):
         os.mkdir(MAZE_DIRECTORY)
     saved_maze_files = [
@@ -799,7 +804,7 @@ def main():
         "Average frames per maze": 0,
         "FPS": 0,
     }
-    car = None
+    mouse = None
 
     # main loop
     while running:
@@ -809,35 +814,49 @@ def main():
             break
         elapsed_time = time.monotonic() - start_time
         stats_info_global["FPS"] = stats_info_global["Total frames"] // elapsed_time
-        if new_track_and_car_needed:
-            # create the track and draw it on the background
-            if car is not None:
+        if new_maze_and_mouse_needed:
+            # create the maze and draw it on the background
+            if mouse is not None:
                 stats_info_global["Total mazes"] += 1
-                if car.won:
+                if mouse.won:
                     stats_info_global["Success count"] += 1
                     stats_info_global["Total successes"] += 1
                     stats_info_global["Max successes in a row"] = max(
                         stats_info_global["Max successes in a row"],
                         stats_info_global["Success count"],
                     )
-                elif car.crashed:
+                elif mouse.crashed:
                     stats_info_global["Max successes in a row"] = max(
                         stats_info_global["Max successes in a row"],
                         stats_info_global["Success count"],
                     )
                     stats_info_global["Success count"] = 0
-                stats_info_global["Success ratio"] = stats_info_global["Total successes"] / stats_info_global["Total mazes"]
-                stats_info_global["Average frames per maze"] = stats_info_global["Total frames"] / stats_info_global["Total mazes"]
-            track = Maze(window_size, background)
+                stats_info_global["Success ratio"] = (
+                    stats_info_global["Total successes"]
+                    / stats_info_global["Total mazes"]
+                )
+                stats_info_global["Average frames per maze"] = (
+                    stats_info_global["Total frames"] / stats_info_global["Total mazes"]
+                )
+            maze = Maze(ROWS, COLS)
             if saved_maze_counter < saved_maze_count:
-                track.load(MAZE_DIRECTORY + saved_maze_files[saved_maze_counter])
+                maze.load(MAZE_DIRECTORY + saved_maze_files[saved_maze_counter])
                 saved_maze_counter += 1
             else:
-                track.create()
-            car = Mouse(
-                background, visited_by_car_screen, track_distances_screen, track
+                maze.create()
+            maze_drawer = MazeDrawer(maze, window_size, background)
+            maze_drawer.draw_maze(maze.maze_tiny, PURE_WHITE, BLACK)
+            maze_drawer.draw_start(background, SQUARE_SIZE, (100, 100, 100))
+            maze_drawer.draw_finish(
+                window_size, background, SQUARE_SIZE, (100, 100, 100)
             )
-            new_track_and_car_needed = False
+            mouse = Mouse(
+                background,
+                visited_by_mouse_screen,
+                maze_wall_distances_screen,
+                maze.maze_big,
+            )
+            new_maze_and_mouse_needed = False
 
         # event handling, gets all event from the event queue
         for event in pygame.event.get():
@@ -853,7 +872,7 @@ def main():
             # https://stackoverflow.com/questions/35850362/importerror-no-module-named-curses-when-trying-to-import-blessings
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_n:
-                    new_track_and_car_needed = True
+                    new_maze_and_mouse_needed = True
                     continue
                 elif event.key == pygame.K_ESCAPE:
                     running = False
@@ -862,55 +881,49 @@ def main():
                 elif event.key == pygame.K_SPACE:
                     paused = not paused
                 elif event.key == pygame.K_RIGHT:
-                    car.speed_increase()
+                    mouse.speed_increase()
                 elif event.key == pygame.K_LEFT:
-                    car.speed_decrease()
+                    mouse.speed_decrease()
                 elif event.key == pygame.K_s:
-                    track.save(timestamp=False)
-                elif event.key == pygame.K_l:
-                    track = Maze(window_size, background)
-                    track.load("maze.txt")
-                    car = Mouse(
-                        background, visited_by_car_screen, track_distances_screen, track
-                    )
+                    maze.save(timestamp=False)
 
         if paused:
             continue
 
         if (
             stats_info_global["Total frames"] % FRAME_DISPLAY_RATE == 0
-            or car.won is True
-            or car.crashed is True
+            or mouse.won is True
+            or mouse.crashed is True
         ):
             draw_frame = True
         else:
             draw_frame = False
 
-        if not car.crashed and not car.won:
-            car.drive(draw_frame)
+        if not mouse.crashed and not mouse.won:
+            mouse.drive(draw_frame)
 
         if draw_frame:
-            stats_update(stats_surface, car.stats_info_car, stats_info_global)
+            stats_update(stats_surface, mouse.stats_info_mouse, stats_info_global)
             pygame.display.flip()
             screen.blit(background, (0, 0))
-            screen.blit(car.visited_by_car_screen, (0, 0))
-            screen.blit(car.track_distances_screen, (0, 0))
-            car.car_icon_group.draw(screen)
+            screen.blit(mouse.visited_by_mouse_screen, (0, 0))
+            screen.blit(mouse.maze_wall_distances_screen, (0, 0))
+            mouse.mouse_icon_group.draw(screen)
             screen.blit(stats_surface, (0, 0))
             pygame.display.update()
 
         # clock.tick(400)
 
-        if car.won:
-            new_track_and_car_needed = True
+        if mouse.won:
+            new_maze_and_mouse_needed = True
             # pygame.time.wait(1000)
 
-        if car.crashed:
-            # don't re-save a track that has been loaded from a saved track
+        if mouse.crashed:
+            # don't re-save a maze that has been loaded from a saved maze
             # however a log of those saved ones that have failed again would be n
-            if not track.from_saved:
-                track.save(timestamp=True)
-            new_track_and_car_needed = True
+            if not maze.from_saved:
+                maze.save(timestamp=True)
+            new_maze_and_mouse_needed = True
             # pygame.time.wait(1000)
 
 
