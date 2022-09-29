@@ -72,29 +72,12 @@ CAR_VISITED_PATH_AVOIDANCE_FACTOR = 0.8
 CAR_WHEN_TO_STEER_FACTOR = 2.0
 CAR_VISITED_COLOUR = (100,100,100,50)
 CAR_VISITED_FADE_LEVEL = 1.17
-FRAMES_BETWEEN_BLURRING_VISITED = (ROWS * COLS)//1.45 # the bigger the maze, the longer it could be before returning to a visited bit of the maze
-
-
-def CreateTrailCircle(CAR_VISITED_PATH_RADIUS, number_in_circle):
-    x = np.arange(-CAR_VISITED_PATH_RADIUS, CAR_VISITED_PATH_RADIUS)
-    y = np.arange(-CAR_VISITED_PATH_RADIUS, CAR_VISITED_PATH_RADIUS)
-    arr = np.zeros((y.size, x.size))
-
-    cx = 0.
-    cy = 0.
-    r = CAR_VISITED_PATH_RADIUS
-
-    # The two lines below could be merged, but I stored the mask
-    # for code clarity.
-    mask = (x[np.newaxis,:]-cx)**2 + (y[:,np.newaxis]-cy)**2 < r**2
-    arr[mask] = number_in_circle
-    return arr
+FRAMES_BETWEEN_BLURRING_VISITED = (ROWS * COLS)//10 # the bigger the maze, the longer it could be before returning to a visited bit of the maze
     
-def CreateTrailCircleRGBA(CAR_VISITED_PATH_RADIUS, number_in_circle):
+def CreateTrailCircleAlpha(CAR_VISITED_PATH_RADIUS, trail_alpha):
     x = np.arange(-CAR_VISITED_PATH_RADIUS, CAR_VISITED_PATH_RADIUS)
     y = np.arange(-CAR_VISITED_PATH_RADIUS, CAR_VISITED_PATH_RADIUS)
-    arrRGB = np.zeros((y.size, x.size), dtype=np.int16)
-    arrA = np.zeros((y.size, x.size), dtype=np.int16)
+    arrAlpha = np.zeros((y.size, x.size), dtype=np.int16)
 
     cx = 0.
     cy = 0.
@@ -103,36 +86,11 @@ def CreateTrailCircleRGBA(CAR_VISITED_PATH_RADIUS, number_in_circle):
     # The two lines below could be merged, but I stored the mask
     # for code clarity.
     mask = (x[np.newaxis,:]-cx)**2 + (y[:,np.newaxis]-cy)**2 < r**2
-    arrRGB[mask] = number_in_circle
-    arrA[mask] = 10
-    arrRGBA = np.dstack((arrRGB,arrRGB,arrRGB,arrA))
-    return arrRGBA
+    arrAlpha[mask] = trail_alpha
+    # would be nice for the values to be lower around the edge of the circle
+    return arrAlpha
 
-CAR_TRAIL_CIRCLE = CreateTrailCircle(CAR_VISITED_PATH_RADIUS, 20)
-CAR_TRAIL_CIRCLE_RGBA = CreateTrailCircleRGBA(CAR_VISITED_PATH_RADIUS, 0)
-
-# pygame's methods for creating a surface (e.g. pygame.surfarray.make_surface) don't allow for an alpha channel, so need a custom method that does
-# from https://github.com/pygame/pygame/issues/1244
-def make_surface_rgba(array):
-    """Returns a surface made from a [w, h, 4] numpy array with per-pixel alpha
-    """
-    shape = array.shape
-    if len(shape) != 3 and shape[2] != 4:
-        raise ValueError("Array not RGBA")
-
-    # Create a surface the same width and height as array and with
-    # per-pixel alpha.
-    surface = pygame.Surface(shape[0:2], pygame.SRCALPHA, 32)
-
-    # Copy the rgb part of array to the new surface.
-    pygame.pixelcopy.array_to_surface(surface, array[:,:,0:3])
-
-    # Copy the alpha part of array to the surface using a pixels-alpha
-    # view of the surface.
-    surface_alpha = np.array(surface.get_view('A'), copy=False)
-    surface_alpha[:,:] = array[:,:,3]
-
-    return surface
+CAR_TRAIL_CIRCLE_ALPHA = CreateTrailCircleAlpha(CAR_VISITED_PATH_RADIUS, 10)
 
 class Directions(Enum):
     UP = 1
@@ -175,13 +133,6 @@ class Backtracking:
             for j in range(self.width):
                 if maze[i, j] == 0.5:
                     maze[i, j] = 1
-
-        # original
-        #maze[1, 2] = 1
-        #maze[self.height - 2, self.width - 3] = 1
-        # set start and end to 0.5 to identify them
-        #maze[2, 2] = 0.5
-        #maze[self.height - 3, self.width - 3] = 0.5
 
         if self.displayMaze:
             cv2.namedWindow('Maze', cv2.WINDOW_NORMAL)
@@ -253,7 +204,6 @@ class Car():
     def __init__(self, screen, visitedByCarScreen, trackDistancesScreen, track):
         self.screen = screen
         self.visitedByCarScreen = visitedByCarScreen
-        self.visitedByCarScreenOriginal = visitedByCarScreen.copy()
         self.trackDistancesScreen = trackDistancesScreen
         self.track = track
 
@@ -275,8 +225,7 @@ class Car():
         self.crashed = False
         self.won = False
         self.position_previous_rounded = self.position_rounded
-        self.visited = np.zeros(screen.get_size())
-        self.visitedRGBA = np.zeros((screen.get_size()[0],screen.get_size()[1],4), dtype=np.int16)
+        self.visitedAlpha = np.zeros(screen.get_size(), dtype=np.int16)
         
         self.statsInfoCar = {
             "distance":0.0,
@@ -345,7 +294,7 @@ class Car():
             for ted in track_edge_distances:
                 if ted[0][0] == 0:
                     continue
-                distance_for_angle = ted[1]-(CAR_VISITED_PATH_AVOIDANCE_FACTOR*ted[2])
+                distance_for_angle = ted[1]-(CAR_VISITED_PATH_AVOIDANCE_FACTOR*ted[2]) # this takes into account how many of the pixels have been visited but not alpha for each pixel (summed in ted[3])
                 new_steering_angle += distance_for_angle * ted[0][1]
                 if distance_for_angle > max_track_distance: max_track_distance = distance_for_angle
 
@@ -444,32 +393,27 @@ class Car():
         self.carIconGroup.update(self.position_rounded[0], self.position_rounded[1], self.direction_radians)
 
         if self.statsInfoCar["frames"] % FRAMES_BETWEEN_BLURRING_VISITED == 0:
-            self.BlurVisited()
+            self.FadeVisited()
 
     def UpdateVisited(self):
         # update a 2d numpy array that represents visited pixels.
         # it should add a circular array behind itself.
         # needs to know the angle of travel
         # needs to add but only to a level of saturation (max 255)
-        #self.visited[self.position_rounded[0]-CAR_VISITED_PATH_RADIUS:self.position_rounded[0]+CAR_VISITED_PATH_RADIUS, self.position_rounded[1]-CAR_VISITED_PATH_RADIUS:self.position_rounded[1]+CAR_VISITED_PATH_RADIUS] = True
-        #pygame.draw.circle(self.visitedByCarScreen, CAR_VISITED_COLOUR, self.position_previous_rounded, CAR_VISITED_PATH_RADIUS)
         circle_top_left_x = round(self.position[0] - CAR_VISITED_PATH_RADIUS * math.cos(self.direction_radians) - CAR_VISITED_PATH_RADIUS)
         circle_top_left_y = round(self.position[1] - CAR_VISITED_PATH_RADIUS * math.sin(self.direction_radians) - CAR_VISITED_PATH_RADIUS)
         #https://stackoverflow.com/questions/9886303/adding-different-sized-shaped-displaced-numpy-matrices
-        self.visited[circle_top_left_x:circle_top_left_x+2*CAR_VISITED_PATH_RADIUS,circle_top_left_y:circle_top_left_y+2*CAR_VISITED_PATH_RADIUS] += CAR_TRAIL_CIRCLE  # use array slicing
-        self.visitedRGBA[circle_top_left_x:circle_top_left_x+2*CAR_VISITED_PATH_RADIUS,circle_top_left_y:circle_top_left_y+2*CAR_VISITED_PATH_RADIUS] += CAR_TRAIL_CIRCLE_RGBA  # use array slicing
-        #np.clip(self.visited[circe_top_left_x:circe_top_left_x+2*CAR_VISITED_PATH_RADIUS,circe_top_left_y:circe_top_left_y+2*CAR_VISITED_PATH_RADIUS], 0, 255)
-        np.clip(self.visited, 0, 255, out=self.visited)
-        np.clip(self.visitedRGBA, 0, 255, out=self.visitedRGBA)
-        a = pygame.surfarray.make_surface(self.visited)
-        b = make_surface_rgba(self.visitedRGBA)
-        self.visitedByCarScreen = self.visitedByCarScreenOriginal.copy()
-        self.visitedByCarScreen.blit(b, (0, 0))
+        self.visitedAlpha[circle_top_left_x:circle_top_left_x+2*CAR_VISITED_PATH_RADIUS,circle_top_left_y:circle_top_left_y+2*CAR_VISITED_PATH_RADIUS] += CAR_TRAIL_CIRCLE_ALPHA  # use array slicing
+        np.clip(self.visitedAlpha, 0, 255, out=self.visitedAlpha)
+        
+        # from https://github.com/pygame/pygame/issues/1244
+        surface_alpha = np.array(self.visitedByCarScreen.get_view('A'), copy=False)
+        surface_alpha[:,:] = self.visitedAlpha
 
-    def BlurVisited(self):
-        # subtract 20 from the alpha channel but stop it going below zero
-        self.visitedRGBA[:,:,3] = self.visitedRGBA[:,:,3] - 20
-        np.clip(self.visitedRGBA, 0, 255, out=self.visitedRGBA)
+    def FadeVisited(self):
+        # subtract from the alpha channel but stop it going below zero
+        self.visitedAlpha -= 1
+        np.clip(self.visitedAlpha, 0, 255, out=self.visitedAlpha)
         return
     
     def CheckIfPositionWins(self, x, y):
@@ -500,8 +444,8 @@ class Car():
         track_edge_distances = []
 
         for vision_angle_and_weight in CAR_VISION_ANGLES_AND_WEIGHTS:
-            track_edge_distance, visited_count = self.GetTrackEdgeDistance(vision_angle_and_weight[0], draw_lines)
-            track_edge_distances.append((vision_angle_and_weight, track_edge_distance, visited_count))
+            track_edge_distance, visited_count, visited_alpha_total = self.GetTrackEdgeDistance(vision_angle_and_weight[0], draw_lines)
+            track_edge_distances.append((vision_angle_and_weight, track_edge_distance, visited_count, visited_alpha_total))
         
         return track_edge_distances
     
@@ -515,6 +459,7 @@ class Car():
         #test_x, test_y = self.position_rounded
         edge_distance = 0
         visited_count = 0
+        visited_alpha_total = 0
 
         for i in range(CAR_VISITED_PATH_RADIUS, CAR_VISION_DISTANCE):
             edge_distance = i
@@ -523,16 +468,15 @@ class Car():
             if self.track.track_pixels[round(test_x)][round(test_y)] == False:
                 break
             
-            #if i>CAR_VISITED_PATH_RADIUS:
-            #visited_colour = pygame.Surface.get_at(visitedByCarScreen, (round(test_x),round(test_y)))
-            visited_colour = self.visited[round(test_x),round(test_y)]
-            if CAR_VISITED_COLOUR[0]/CAR_VISITED_FADE_LEVEL<=visited_colour<CAR_VISITED_COLOUR[0]*CAR_VISITED_FADE_LEVEL:
+            visited_alpha = self.visitedAlpha[round(test_x),round(test_y)]
+            visited_alpha_total += visited_alpha
+            if visited_alpha > 0:
                 visited_count += 1 
-    
+
         if draw_line:
             self.DrawLineToTrackEdge(test_x, test_y)
 
-        return edge_distance, visited_count
+        return edge_distance, visited_count, visited_alpha_total
     
     def DrawLineToTrackEdge(self, test_x, test_y):
         pygame.draw.line(self.trackDistancesScreen, WHITE, self.position_rounded, [round(test_x), round(test_y)])
@@ -553,7 +497,8 @@ class Track():
         self.track_pixels = []
         self.maze = []
     
-    def Create(self):
+    def Create(self):    
+        pygame.display.set_caption("New maze")
         maze = self.GetNewMaze()
         maze = self.SetMazeEndPoints(maze)
         self.maze = maze
@@ -568,6 +513,7 @@ class Track():
         np.savetxt(filename, self.maze, fmt='%s')
 
     def Load(self, filename):
+        pygame.display.set_caption("Maze: " + filename)
         maze = np.loadtxt(filename, dtype=np.float32)
         self.maze = maze
         self.SetScaledMazeSurface(maze)
@@ -652,7 +598,7 @@ def main():
 
     visitedByCarScreen = pygame.Surface(window_size, pygame.SRCALPHA, 32)
     visitedByCarScreen = visitedByCarScreen.convert_alpha()
-    visitedByCarScreenCopy = visitedByCarScreen.copy()
+    visitedByCarScreen.fill((0,0,0,0))
 
     trackDistancesScreen = pygame.Surface(window_size, pygame.SRCALPHA, 32)
     trackDistancesScreen = trackDistancesScreen.convert_alpha()
@@ -705,7 +651,6 @@ def main():
                 savedMazeCounter += 1
             else:
                 track.Create()
-            visitedByCarScreen = visitedByCarScreenCopy.copy() # clear this surface
             car = Car(background, visitedByCarScreen, trackDistancesScreen, track)            
             newTrackAndCarNeeded = False
 
@@ -718,13 +663,6 @@ def main():
                 pygame.quit
                 sys.exit()
                 break
-            
-            #if event.type == pygame.MOUSEBUTTONDOWN:
-            #    # get the mouse position
-            #    mouse_pos = pygame.mouse.get_pos()
-            #    car.position = mouse_pos
-            #    car.GetTrackEdgeDistances(True)
-            #    continue
 
             # for the next bit, on windows, you need to:
             # pip install windows-curses
@@ -751,7 +689,6 @@ def main():
                 elif event.key == pygame.K_l:
                     track = Track(window_size, background)
                     track.Load('maze.txt')
-                    visitedByCarScreen = visitedByCarScreenCopy.copy() # clear this surface
                     car = Car(background, visitedByCarScreen, trackDistancesScreen, track)  
         
         if paused:
@@ -764,7 +701,6 @@ def main():
         pygame.display.flip()
         screen.blit(background, (0,0))
         screen.blit(car.visitedByCarScreen, (0,0))
-        #car.visitedByCarScreen = visitedByCarScreenCopy.copy() # clear this surface
         screen.blit(car.trackDistancesScreen, (0,0))
         car.trackDistancesScreen = trackDistancesScreenCopy.copy() # clear this surface
         car.carIconGroup.draw(screen)
