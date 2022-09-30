@@ -19,15 +19,16 @@ Have a look at output.png
 # https://github.com/AryanAb/MazeGenerator/blob/master/backtracking.py
 # A good alternative might be https://github.com/AryanAb/MazeGenerator/blob/master/hunt_and_kill.py
 
-# import the pygame module, so you can use it
-import sys
-import random
 import math
-import time
 import os
 import os.path
+import random
+# import the pygame module, so you can use it
+import sys
+import time
 from collections import deque
 from enum import Enum
+
 import numpy as np
 import pygame
 from numba import jit
@@ -41,7 +42,7 @@ RED = (255, 0, 0)
 GREEN = (0, 255, 0)
 SQUARE_SIZE = 70
 ROWS = 13
-COLS = 19
+COLS = 21
 # mouse will "crash" if it takes more than this distance to complete the maze
 MAZE_MAX_DISTANCE_TO_COMPLETE = ROWS * COLS * SQUARE_SIZE**1.5
 # mazes that the mouse fails to solve are saved here.
@@ -76,10 +77,11 @@ CAR_STEERING_MULTIPLIER = 2.5
 CAR_VISITED_PATH_RADIUS = 20
 CAR_TRAIL_CIRCLE_ALPHA = None
 # how much wider the maze is than the path
-CAR_VISITED_PATH_AVOIDANCE_FACTOR = 1.25 * SQUARE_SIZE / (2 * CAR_VISITED_PATH_RADIUS)
+CAR_VISITED_PATH_AVOIDANCE_FACTOR = 1.25 * \
+    SQUARE_SIZE / (2 * CAR_VISITED_PATH_RADIUS)
 # the bigger the maze, the longer it could be before returning to a visited bit of maze
 FRAMES_BETWEEN_BLURRING_VISITED = (ROWS * COLS) // 10
-FRAME_DISPLAY_RATE = 500
+FRAME_DISPLAY_RATE = 2
 
 
 @staticmethod
@@ -289,7 +291,8 @@ class MouseIcon(pygame.sprite.Sprite):
 
     def rot_center(self, image, rect, angle_radians):
         """rotate an image while keeping its center"""
-        rot_image = pygame.transform.rotate(image, 270 - math.degrees(angle_radians))
+        rot_image = pygame.transform.rotate(
+            image, 270 - math.degrees(angle_radians))
         rot_rect = rot_image.get_rect(center=rect.center)
         return rot_image, rot_rect
 
@@ -308,7 +311,8 @@ class Mouse:
         # and to see if the mouse is still on the maze
         # starting position is in the middle of top left square inside the border
         self.position = (SQUARE_SIZE * 1.5, SQUARE_SIZE * 1.5)
-        self.position_rounded = (round(self.position[0]), round(self.position[1]))
+        self.position_rounded = (
+            round(self.position[0]), round(self.position[1]))
         self.speed = SQUARE_SIZE / 50  # pixels per frame
         self.speed_min = CAR_SPEED_MIN_INITIAL
         self.speed_max = CAR_SPEED_MAX_INITIAL
@@ -338,7 +342,8 @@ class Mouse:
         # keep a list of the 20 last instructions, so we can see where it went wrong
         self.latest_instructions = deque(maxlen=20)
 
-        self.mouse_icon = MouseIcon(self.position_rounded[0], self.position_rounded[1])
+        self.mouse_icon = MouseIcon(
+            self.position_rounded[0], self.position_rounded[1])
         self.mouse_icon_group = pygame.sprite.Group()
         self.mouse_icon_group.add(self.mouse_icon)
 
@@ -394,7 +399,8 @@ class Mouse:
         if draw_frame:
             self.draw_lines_to_maze_edge(whiskers)
 
-        self.won = self.check_if_position_wins(self.position[0], self.position[1])
+        self.won = self.check_if_position_wins(
+            self.position[0], self.position[1])
         if self.won:
             self.draw_mouse_finish_location(GREEN)
             return
@@ -433,7 +439,8 @@ class Mouse:
                     ted[1]
                     * (
                         1
-                        - (ted[3] * CAR_VISITED_PATH_AVOIDANCE_FACTOR) / (255 * ted[1])
+                        - (ted[3] * CAR_VISITED_PATH_AVOIDANCE_FACTOR) /
+                        (255 * ted[1])
                     ),
                 )
 
@@ -505,7 +512,8 @@ class Mouse:
         self.direction_radians = new_direction_radians
 
         self.position = new_position
-        self.position_rounded = (round(self.position[0]), round(self.position[1]))
+        self.position_rounded = (
+            round(self.position[0]), round(self.position[1]))
 
         mouse_speed_colour = round(255 * self.speed / self.speed_max)
         mouse_colour = (255 - mouse_speed_colour, mouse_speed_colour, 0)
@@ -513,11 +521,13 @@ class Mouse:
 
         if draw_frame:
             pygame.display.update(
-                pygame.Rect(self.position_rounded[0], self.position_rounded[1], 1, 1)
+                pygame.Rect(
+                    self.position_rounded[0], self.position_rounded[1], 1, 1)
             )
             pygame.display.update()
 
-        self.update_visited(self.position, self.direction_radians, self.visited_alpha)
+        self.update_visited(
+            self.position, self.direction_radians, self.visited_alpha)
 
         if draw_frame:
             # from https://github.com/pygame/pygame/issues/1244
@@ -581,8 +591,8 @@ class Mouse:
         )
         # https://stackoverflow.com/questions/9886303/adding-different-sized-shaped-displaced-numpy-matrices
         section_to_update = visited_alpha[
-            circle_top_left_x : circle_top_left_x + 2 * CAR_VISITED_PATH_RADIUS,
-            circle_top_left_y : circle_top_left_y + 2 * CAR_VISITED_PATH_RADIUS,
+            circle_top_left_x: circle_top_left_x + 2 * CAR_VISITED_PATH_RADIUS,
+            circle_top_left_y: circle_top_left_y + 2 * CAR_VISITED_PATH_RADIUS,
         ]
         section_to_update += CAR_TRAIL_CIRCLE_ALPHA  # use array slicing
         np.clip(section_to_update, 0, 255, out=section_to_update)
@@ -712,7 +722,8 @@ class Mouse:
     def draw_lines_to_maze_edge(self, whiskers):
         """draw lines from the mouse to the edge of the maze"""
         self.maze_wall_distances_screen.fill((0, 0, 0, 0))
-        pygame.draw.lines(self.maze_wall_distances_screen, WHITE, False, whiskers)
+        pygame.draw.lines(self.maze_wall_distances_screen,
+                          WHITE, False, whiskers)
 
     def draw_mouse_finish_location(self, highlight_colour):
         """draw where the mouse finishes"""
@@ -773,7 +784,8 @@ def main():
     visited_by_mouse_screen = visited_by_mouse_screen.convert_alpha()
     visited_by_mouse_screen.fill((0, 0, 0, 0))
 
-    maze_wall_distances_screen = pygame.Surface(window_size, pygame.SRCALPHA, 32)
+    maze_wall_distances_screen = pygame.Surface(
+        window_size, pygame.SRCALPHA, 32)
     maze_wall_distances_screen = maze_wall_distances_screen.convert_alpha()
 
     stats_surface = pygame.Surface(window_size)
@@ -836,11 +848,13 @@ def main():
                     / stats_info_global["Total mazes"]
                 )
                 stats_info_global["Average frames per maze"] = (
-                    stats_info_global["Total frames"] / stats_info_global["Total mazes"]
+                    stats_info_global["Total frames"] /
+                    stats_info_global["Total mazes"]
                 )
             maze = Maze(ROWS, COLS)
             if saved_maze_counter < saved_maze_count:
-                maze.load(MAZE_DIRECTORY + saved_maze_files[saved_maze_counter])
+                maze.load(MAZE_DIRECTORY +
+                          saved_maze_files[saved_maze_counter])
                 saved_maze_counter += 1
             else:
                 maze.create()
@@ -903,7 +917,8 @@ def main():
             mouse.drive(draw_frame)
 
         if draw_frame:
-            stats_update(stats_surface, mouse.stats_info_mouse, stats_info_global)
+            stats_update(stats_surface, mouse.stats_info_mouse,
+                         stats_info_global)
             pygame.display.flip()
             screen.blit(background, (0, 0))
             screen.blit(mouse.visited_by_mouse_screen, (0, 0))
