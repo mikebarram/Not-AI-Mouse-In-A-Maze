@@ -1,5 +1,5 @@
 # Not AI mouse in a maze
-Following on from "not AI car", which drove around a track, using simple instructions, rather than AI, this is a mouse (originally a car) that has to go from the top left of a maze to the bottom right.
+Following on from "[not AI car](https://github.com/mikebarram/Not-AI-Car)", which drove around a track, using simple instructions, rather than AI, this is a mouse (originally a car) that has to go from the top left of a maze to the bottom right.
 
 Mazes are generated randomly. The mouse can't properly remember where it has been but it leaves a scent trail behind it, which gradually disappears, so it can tell where it has been for a while:
 ![Example maze](example_maze.png)
